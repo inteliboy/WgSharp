@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  WiX Toolset v3.14 source for the WgSharp MSI installer.
+
+  Built directly with candle.exe/light.exe from build.cmd — no MSBuild, no
+  Visual Studio WiX project, consistent with how the rest of WgSharp is built.
+
+  Inputs passed in from build.cmd via -d preprocessor variables:
+    ProductVersion  e.g. "1.26.0629"; the SAME version string the exe
+                    itself gets (see build.cmd: it's not "1.YYYY.MM.DD"
+                    because MSI's version field can't hold a 4-digit year)
+    SourceDir       full path to the built bin\amd64 folder (contains WgSharp.exe)
+    RepoDir         full path to the repo root (contains LICENSE, README.md, WgSharp.ico)
+
+  What this installs:
+    - WgSharp.exe to a FIXED location, Program Files\WgSharp (no "choose a
+      folder" dialog; see the UI comment further down for why)
+    - LICENSE and README.md alongside it
+    - A Start Menu shortcut (with an Uninstall entry alongside it)
+    - Standard Add/Remove Programs registration
+
+  What this deliberately does NOT do:
+    - Install/start the background service, or touch the Windows Firewall, or
+      enable login autostart; those are WgSharp's OWN first-run behavior
+      (see src/core/InstallLocation.cs): when WgSharp detects it's running
+      from this exact installed path, it enables autostart + the service by
+      default and disallows turning on Portable mode, entirely on its own at
+      first run. The installer's job is just to put the exe on disk;
+      everything else happens the first time the app itself starts.
+-->
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*"
+           Name="WgSharp"
+           Language="1033"
+           Version="$(var.ProductVersion)"
+           Manufacturer="inteliboy"
+           UpgradeCode="9E3F2B7E-6B5B-4C8C-9B7F-1B6E2F2A4A11">
+
+    <Package InstallerVersion="500"
+             Compressed="yes"
+             InstallScope="perMachine"
+             Platform="x64"
+             Description="WgSharp - a from-scratch WireGuard client for Windows"
+             Manufacturer="inteliboy" />
+
+    <!-- Same-product upgrades: installing a newer dated build replaces the
+         older one in place rather than producing a side-by-side mess. -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of WgSharp is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="WgSharpIcon" SourceFile="$(var.RepoDir)\WgSharp.ico" />
+    <Property Id="ARPPRODUCTICON" Value="WgSharpIcon" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/inteliboy/WgSharp" />
+    <Property Id="ARPNOREPAIR" Value="yes" Secure="yes" />
+
+    <!-- x64-only install location, matching WgSharp's amd64-only build. -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLFOLDER" Name="WgSharp" />
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="WgSharp" />
+      </Directory>
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER">
+      <Component Id="MainExecutable" Guid="*" Win64="yes">
+        <File Id="WgSharpExe" Source="$(var.SourceDir)\WgSharp.exe" KeyPath="yes" />
+      </Component>
+      <Component Id="LicenseFile" Guid="*" Win64="yes">
+        <File Id="LicenseTxt" Source="$(var.RepoDir)\LICENSE" Name="LICENSE.txt" KeyPath="yes" />
+      </Component>
+      <Component Id="ReadmeFile" Guid="*" Win64="yes">
+        <File Id="ReadmeMd" Source="$(var.RepoDir)\README.md" Name="README.md" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <DirectoryRef Id="ApplicationProgramsFolder">
+      <Component Id="ApplicationShortcuts" Guid="*" Win64="yes">
+        <RemoveFolder Id="CleanUpShortcutFolder" Directory="ApplicationProgramsFolder" On="uninstall" />
+        <!-- The shortcut lives in ITS OWN component, keyed on an HKCU
+             registry value rather than the exe file — not just tidiness:
+             putting it on the per-machine exe File's KeyPath instead (as an
+             earlier version of this file did) trips two ICE validations:
+             ICE43 (non-advertised shortcuts need an HKCU KeyPath, not a
+             file) and ICE57 (a single component can't mix per-machine data,
+             the Program-Files file, with per-user data, an HKCU value, under
+             one KeyPath). Since the shortcut isn't nested inside its target
+             File element here, Target must be set explicitly. -->
+        <Shortcut Id="StartMenuShortcut"
+                   Directory="ApplicationProgramsFolder"
+                   Name="WgSharp"
+                   Target="[#WgSharpExe]"
+                   WorkingDirectory="INSTALLFOLDER"
+                   Icon="WgSharpIcon"
+                   IconIndex="0" />
+        <RegistryValue Root="HKCU" Key="Software\WgSharp" Name="Installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </DirectoryRef>
+
+    <Feature Id="MainFeature" Title="WgSharp" Level="1" AllowAdvertise="no">
+      <ComponentRef Id="MainExecutable" />
+      <ComponentRef Id="LicenseFile" />
+      <ComponentRef Id="ReadmeFile" />
+      <ComponentRef Id="ApplicationShortcuts" />
+    </Feature>
+
+    <!-- Stock minimal UI (Welcome -> License -> Install -> Finish) — no
+         "choose install folder" dialog, so the location is fixed at
+         Program Files\WgSharp and can't be changed at install time. This is
+         intentional: WgSharp detects when it's running from that exact path
+         (see InstallLocation.cs) and changes its defaults accordingly
+         (auto-enables autostart + the background service, and disallows
+         Portable mode) — a movable install location would break that
+         detection. Anyone who wants a relocatable/portable copy should use
+         the plain exe from the zip distribution instead of this installer. -->
+    <UIRef Id="WixUI_Minimal" />
+    <UIRef Id="WixUI_ErrorProgressText" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.RepoDir)\installer\License.rtf" />
+
+    <!-- "Launch WgSharp when Setup exits" checkbox on the Finish dialog.
+         WixShellExec (and the WixCA binary it runs from) come from
+         WixUtilExtension, referenced alongside WixUIExtension in build.cmd. -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch WgSharp when Setup exits" />
+    <Property Id="WixShellExecTarget" Value="[#WgSharpExe]" />
+    <CustomAction Id="LaunchApplication" BinaryKey="WixCA" DllEntry="WixShellExec" Impersonate="yes" />
+    <UI>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication">
+        WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed
+      </Publish>
+    </UI>
+  </Product>
+</Wix>

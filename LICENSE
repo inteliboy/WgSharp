@@ -19,3 +19,17 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+This license applies to WgSharp's own source code only. WgSharp optionally
+downloads and uses the official, signed wintun.dll (Wintun) and wireguard.dll
+(WireGuardNT) drivers at runtime; those drivers are separate components
+authored by Jason A. Donenfeld / WireGuard LLC. Their underlying driver source
+code is licensed under the GNU GPLv2, and is available in the author's own
+repositories (git.zx2c4.com/wintun and git.zx2c4.com/wireguard-nt). The
+prebuilt, signed DLL binaries that WgSharp actually downloads and uses are
+distributed under WireGuard LLC's own "Prebuilt Binaries License" (included
+in each driver's own download), which permits shipping the unmodified DLL
+alongside other software via its documented API. Neither driver's source nor
+binary is redistributed as part of this repository.
