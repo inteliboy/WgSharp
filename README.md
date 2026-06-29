@@ -524,4 +524,10 @@ projects is available in the author's own repositories:
 
 Copyright © 2026 [inteliboy](https://github.com/inteliboy) · Made with C# 5, `csc.exe`, and a healthy disregard for build systems.
 
+## ❤️ Support My Work
+
+If you find my projects useful, consider supporting me:
+
+[![Buy Me A Coffee](https://img.buymeacoffee.com/button-api/?text=Buy+me+a+coffee&emoji=☕&slug=inteliboy&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff)](https://buymeacoffee.com/inteliboy)
+
 </div>
