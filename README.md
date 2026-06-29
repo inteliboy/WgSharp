@@ -24,6 +24,10 @@ transport data path. A WinForms GUI. All compiled with `csc.exe` alone —
 > [Current scope and limitations](#current-scope-and-limitations).
 
 ---
+<img width="762" height="502" alt="Screenshot1" src="https://github.com/user-attachments/assets/2f565607-d407-4db4-85b8-dde3063e747e" />
+<img width="762" height="502" alt="Screenshot2" src="https://github.com/user-attachments/assets/eba9b9f0-846f-4602-9bde-cb352b4d7082" />
+<img width="762" height="502" alt="Screenshot3" src="https://github.com/user-attachments/assets/e1ad4fb5-cdc5-49ee-94f6-69d9848053f6" />
+<img width="762" height="502" alt="Screenshot4" src="https://github.com/user-attachments/assets/6b834b21-5dc9-4893-96c1-461905e9eded" />
 
 ## Table of contents
 
