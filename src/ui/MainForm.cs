@@ -220,6 +220,16 @@ namespace WgSharp.Ui
             txtLog.ForeColor = AppTheme.FieldValue;
         }
 
+        // Maximum number of lines kept in the Log tab's RichTextBox.
+        // Each line is roughly 80-150 chars; 2000 lines ≈ 200-300 KB — a
+        // comfortable ceiling that never accumulates noticeably and is never
+        // visible all at once anyway (the control shows ~30 lines at a time).
+        // When the cap is hit, the oldest 10% are trimmed at once rather than
+        // one-by-one to avoid O(n²) text scans on every append.
+        private const int LogMaxLines = 2000;
+        private const int LogTrimLines = 200; // trim this many from the top when over the cap
+        private int _logLineCount;
+
         private void Log(string msg)
         {
             if (msg == null) return;
@@ -234,7 +244,7 @@ namespace WgSharp.Ui
             // "[WFP] ..."). Direct UI-originated messages don't carry a tag, so
             // mark those as [App] here rather than touching every call site.
             string tagged = (msg.Length > 0 && msg[0] == '[') ? msg : "[App] " + msg;
-            txtLog.AppendText(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff ") + tagged + "\r\n");
+            AppendLogLine(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff ") + tagged);
         }
 
         // Appends a line that already carries its own timestamp (forwarded from
@@ -246,7 +256,38 @@ namespace WgSharp.Ui
         {
             if (line == null) return;
             if (txtLog.InvokeRequired) { txtLog.BeginInvoke(new Action<string>(LogRaw), line); return; }
+            AppendLogLine(line);
+        }
+
+        private void AppendLogLine(string line)
+        {
+            // Trim the oldest LogTrimLines lines when we hit the cap, so the
+            // total never exceeds LogMaxLines + LogTrimLines - 1.  We do it in
+            // a batch rather than one-at-a-time to avoid O(n²) scans.
+            if (_logLineCount >= LogMaxLines)
+            {
+                try
+                {
+                    string text = txtLog.Text;
+                    int cut = 0, found = 0;
+                    while (found < LogTrimLines && cut < text.Length)
+                    {
+                        int nl = text.IndexOf('\n', cut);
+                        if (nl < 0) break;
+                        cut = nl + 1;
+                        found++;
+                    }
+                    if (cut > 0)
+                    {
+                        txtLog.Select(0, cut);
+                        txtLog.SelectedText = "";
+                        _logLineCount -= found;
+                    }
+                }
+                catch { /* never block a log line because of trimming */ }
+            }
             txtLog.AppendText(line + "\r\n");
+            _logLineCount++;
         }
 
         private void TryParseConfig()

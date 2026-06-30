@@ -269,7 +269,15 @@ namespace WgSharp.Svc
         // Logging must never be the reason the service crashes — everything
         // here is best-effort and swallows its own errors.
 
-        private const int LogRingMax = 400;
+        // In-memory log ring buffer. The GUI pulls recent lines from this over
+        // the pipe (the LOG command) and appends them to its own Log tab, so
+        // the service never needs to show more than what happened "recently".
+        // Each line is a timestamp + component tag + message, roughly 80-150
+        // chars. 200 lines ≈ 20-30 KB -- small and tight. The GUI's own Log
+        // tab has its own larger cap (LogMaxLines = 2000) and is the right
+        // place for the user to scroll through history; the ring is just the
+        // transfer buffer between service and GUI.
+        private const int LogRingMax = 200;
         private readonly System.Collections.Generic.Queue<string> _logRing =
             new System.Collections.Generic.Queue<string>();
 

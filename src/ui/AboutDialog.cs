@@ -140,14 +140,15 @@ namespace WgSharp.Ui
         }
 
         /// <summary>
-        /// Reads the exe's own embedded version: "1.YY.MMDD", stamped by
+        /// Reads the exe's own embedded version: "1.YY.MMDD.0", stamped by
         /// build.cmd into AssemblyInformationalVersion at build time (see
-        /// build.cmd and src/core/AssemblyInfo.generated.cs) -- the same
-        /// version string the MSI installer (if built) also uses. That
-        /// attribute is a free-form string field, so unlike
-        /// AssemblyVersion/FileVersion it preserves the exact zero-padded
-        /// text (e.g. "1.26.0629") rather than losing a leading zero in a
-        /// month before October to the numeric 4-part version format.
+        /// build.cmd and src/core/AssemblyInfo.generated.cs). The MSI
+        /// installer (if built) uses the leading 3 fields of this same date
+        /// encoding for its own ProductVersion, "1.YY.MMDD" -- Windows
+        /// Installer's version field is strictly 3-part, so it can't carry
+        /// the trailing ".0" the exe's 4-part assembly version fields use,
+        /// but both are stamped from the exact same YY/MM/DD digits in one
+        /// place in build.cmd.
         /// </summary>
         private static string GetBuildVersion()
         {

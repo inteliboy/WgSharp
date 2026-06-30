@@ -24,14 +24,11 @@ transport data path. A WinForms GUI. All compiled with `csc.exe` alone —
 > [Current scope and limitations](#current-scope-and-limitations).
 
 ---
-<img width="762" height="502" alt="Screenshot1" src="https://github.com/user-attachments/assets/2f565607-d407-4db4-85b8-dde3063e747e" />
-<img width="762" height="502" alt="Screenshot2" src="https://github.com/user-attachments/assets/eba9b9f0-846f-4602-9bde-cb352b4d7082" />
-<img width="762" height="502" alt="Screenshot3" src="https://github.com/user-attachments/assets/e1ad4fb5-cdc5-49ee-94f6-69d9848053f6" />
-<img width="762" height="502" alt="Screenshot4" src="https://github.com/user-attachments/assets/6b834b21-5dc9-4893-96c1-461905e9eded" />
 
 ## Table of contents
 
 - [Features](#features)
+- [Screenshots](#screenshots)
 - [Build](#build)
 - [Run](#run)
 - [Sample configuration](#sample-configuration)
@@ -48,6 +45,7 @@ transport data path. A WinForms GUI. All compiled with `csc.exe` alone —
 - [Disclaimer](#disclaimer)
 - [License](#license)
 - [Acknowledgements](#acknowledgements)
+- [Support my work](#support-my-work)
 
 ---
 
@@ -68,6 +66,17 @@ transport data path. A WinForms GUI. All compiled with `csc.exe` alone —
 | 📷 **Scan from QR code** | Add a tunnel by pointing the webcam at a QR code (or scanning a saved image) — a from-scratch QR decoder, no external library. |
 | 🧰 **System tray** | Live status tooltip, quick-connect menu, closing the window minimizes instead of exiting. |
 
+## Screenshots
+
+<p align="center">
+  <img width="762" height="502" alt="WgSharp screenshot 1" src="https://github.com/user-attachments/assets/2f565607-d407-4db4-85b8-dde3063e747e" />
+  <img width="762" height="502" alt="WgSharp screenshot 2" src="https://github.com/user-attachments/assets/eba9b9f0-846f-4602-9bde-cb352b4d7082" />
+</p>
+<p align="center">
+  <img width="762" height="502" alt="WgSharp screenshot 3" src="https://github.com/user-attachments/assets/e1ad4fb5-cdc5-49ee-94f6-69d9848053f6" />
+  <img width="762" height="502" alt="WgSharp screenshot 4" src="https://github.com/user-attachments/assets/6b834b21-5dc9-4893-96c1-461905e9eded" />
+</p>
+
 ## Build
 
 ```bat
@@ -76,7 +85,7 @@ build.cmd
 
 This locates `csc.exe` under `%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\`
 and produces a single build — `bin\amd64\WgSharp.exe` — stamped with a
-`1.YY.MMDD` version (see [Versioning](#versioning) below). WgSharp targets
+`1.YY.MMDD.0` version (see [Versioning](#versioning) below). WgSharp targets
 x64 only (see [Run](#run)). The same exe doubles as the optional background
 service (see [Background service](#background-service-reconnect-before-login))
 — no second file. The script uses relative paths and lets `csc` expand each
@@ -85,24 +94,32 @@ in the install path.
 
 ### Versioning
 
-Every build — the exe and, if built, the MSI — is stamped with the **same**
-version string, `1.YY.MMDD` (today's date), generated fresh by `build.cmd`
+Every build is stamped with today's date, generated fresh by `build.cmd`
 (via `src\core\AssemblyInfo.generated.cs`, regenerated and overwritten on
 every run, not checked into source control). No separate version number to
-remember to bump: build it today, it's `1.26.0629` for 2026-06-29; build it
-again next month, it's that date.
+remember to bump: build it today, it's today's date; build it again next
+month, it's that date.
 
-This isn't `1.YYYY.MM.DD` — neither the exe's version-resource fields nor
-Windows Installer's `ProductVersion` can hold a 4-digit year (both pack
-versions into fixed 8/16-bit numeric fields), so the year is shortened to its
-last two digits instead (good until the year 2255) and month+day are packed
-into a single 4-digit number. For any month before October, that 4-digit
-number itself starts with a zero (e.g. April 5th is `0405`) — and since
-Windows strips leading zeros from purely numeric version fields, the exe's
-numeric "File version" field in Explorer's Properties dialog may show that
-one digit shorter than expected (`1.26.405` rather than `1.26.0405`). The
-**Product version** field on that same dialog, and the About box inside
-WgSharp itself, both show the exact, zero-padded `1.YY.MMDD` text regardless.
+There isn't one identical version string used absolutely everywhere, because
+Windows Installer's `ProductVersion` field is a hard wall: it's strictly
+3-part (`major.minor.build`) and WiX rejects a 4th field outright, while
+.NET's `AssemblyVersion`/`AssemblyFileVersion` are 4-part. So `build.cmd`
+computes ONE date encoding and uses it in both of the only two forms Windows
+actually allows:
+
+- **`1.YY.MMDD.0`** (4 fields) for the exe's `AssemblyVersion`,
+  `AssemblyFileVersion`, and `AssemblyInformationalVersion` — e.g.
+  `1.26.0629.0` for 2026-06-29. The trailing `.0` is a fixed placeholder
+  revision field (there's only ever one build per day from this script).
+- **`1.YY.MMDD`** (3 fields — exactly the first 3 fields of the line above)
+  for the MSI's `ProductVersion`.
+
+Neither can hold a 4-digit year (both pack versions into fixed-width numeric
+fields), so the year is shortened to its last two digits (`YY`, good until
+2255), and month+day are zero-padded into a single unambiguous 4-digit
+`MMDD` number — zero-padding here isn't cosmetic, it's required for
+correctness: without it, month 1/day 23 and month 12/day 3 would both
+produce the same digits ("123").
 
 ### MSI installer (optional)
 
@@ -128,9 +145,11 @@ environment variable, then the usual Program Files path), `build.cmd` skips
 it with a clear `[SKIP]` message and the exe build above is unaffected either
 way — the MSI is a convenience, not a requirement.
 
-It uses the exact same `1.YY.MMDD` version as the exe (see
-[Versioning](#versioning) above) — both are stamped from one computation in
-`build.cmd`, so there's only ever one version number to think about.
+It uses `1.YY.MMDD` — the leading 3 fields of the exe's own `1.YY.MMDD.0`
+(see [Versioning](#versioning) above) — both stamped from one computation in
+`build.cmd`, so there's only ever one date encoding to think about, even
+though Windows Installer's stricter 3-field format keeps the two strings
+from being byte-for-byte identical.
 
 **Installing via the MSI changes WgSharp's defaults**, on the principle that
 a proper install implies "set this up the way I'd actually want it running" —
@@ -518,16 +537,16 @@ projects is available in the author's own repositories:
   implementation, and authored Wintun and WireGuardNT.
 - **WireGuard** is a registered trademark of Jason A. Donenfeld.
 
----
-
-<div align="center">
-
-Copyright © 2026 [inteliboy](https://github.com/inteliboy) · Made with C# 5, `csc.exe`, and a healthy disregard for build systems.
-
 ## ❤️ Support My Work
 
 If you find my projects useful, consider supporting me:
 
 [![Buy Me A Coffee](https://img.buymeacoffee.com/button-api/?text=Buy+me+a+coffee&emoji=☕&slug=inteliboy&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff)](https://buymeacoffee.com/inteliboy)
+
+---
+
+<div align="center">
+
+Copyright © 2026 [inteliboy](https://github.com/inteliboy) · Made with C# 5, `csc.exe`, and a healthy disregard for build systems.
 
 </div>

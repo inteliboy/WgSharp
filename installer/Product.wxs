@@ -6,9 +6,14 @@
   Visual Studio WiX project, consistent with how the rest of WgSharp is built.
 
   Inputs passed in from build.cmd via -d preprocessor variables:
-    ProductVersion  e.g. "1.26.0629"; the SAME version string the exe
-                    itself gets (see build.cmd: it's not "1.YYYY.MM.DD"
-                    because MSI's version field can't hold a 4-digit year)
+    ProductVersion  e.g. "1.26.0629"; the leading 3 fields of the SAME date
+                    encoding the exe's own AssemblyVersion gets (which is
+                    4 fields, "1.26.0629.0"; see build.cmd). Windows
+                    Installer's Version format is strictly 3-part
+                    (major.minor.build) and rejects a 4th field outright, so
+                    this can't be byte-for-byte identical to the exe's
+                    version string; it's the closest match Windows
+                    Installer allows.
     SourceDir       full path to the built bin\amd64 folder (contains WgSharp.exe)
     RepoDir         full path to the repo root (contains LICENSE, README.md, WgSharp.ico)
 
@@ -90,7 +95,7 @@
         <Shortcut Id="StartMenuShortcut"
                    Directory="ApplicationProgramsFolder"
                    Name="WgSharp"
-                   Target="[#WgSharpExe]"
+                   Target="[INSTALLFOLDER]WgSharp.exe"
                    WorkingDirectory="INSTALLFOLDER"
                    Icon="WgSharpIcon"
                    IconIndex="0" />
