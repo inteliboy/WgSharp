@@ -23,6 +23,11 @@
     - LICENSE and README.md alongside it
     - A Start Menu shortcut (with an Uninstall entry alongside it)
     - Standard Add/Remove Programs registration
+    - Closes a running WgSharp automatically before touching its files —
+      BOTH the GUI (util:CloseApplication, with a guaranteed TerminateProcess
+      fallback) and the background service (ServiceControl, since it's the
+      same exe but has no window) — see the comment below the MajorUpgrade
+      element for the full explanation.
 
   What this deliberately does NOT do:
     - Install/start the background service, or touch the Windows Firewall, or
@@ -33,7 +38,8 @@
       first run. The installer's job is just to put the exe on disk;
       everything else happens the first time the app itself starts.
 -->
-<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
+     xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
   <Product Id="*"
            Name="WgSharp"
            Language="1033"
@@ -49,10 +55,81 @@
              Manufacturer="inteliboy" />
 
     <!-- Same-product upgrades: installing a newer dated build replaces the
-         older one in place rather than producing a side-by-side mess. -->
-    <MajorUpgrade DowngradeErrorMessage="A newer version of WgSharp is already installed." />
+         older one in place rather than producing a side-by-side mess.
+
+         AllowSameVersionUpgrades="yes" is NOT optional polish — without it,
+         this was the actual, confirmed cause of "WgSharp.exe doesn't get
+         replaced": Product Id="*" generates a brand-new ProductCode on
+         EVERY build, but our date-based version (1.YY.MMDD; see build.cmd)
+         only has DAY granularity. Rebuild and reinstall twice on the same
+         day (an everyday dev/test scenario, and exactly what was happening
+         here) and the new MSI has a DIFFERENT ProductCode but the IDENTICAL
+         ProductVersion as the one already installed. Per Windows
+         Installer's own documented behavior, with this attribute left at
+         its default ("no"), that combination is NOT treated as a major
+         upgrade at all; it's treated as two unrelated products. The
+         already-installed one (and its files, including WgSharp.exe) is
+         never touched, no matter how cleanly the running processes were
+         closed first; a same-version "upgrade" silently installs alongside
+         it instead of replacing it. AllowSameVersionUpgrades="yes" makes an
+         equal-version product also count as "older, remove it" for this
+         UpgradeCode, which is exactly the behavior every rebuild here
+         needs. WiX's ICE61 validation specifically flags this exact
+         configuration as unusual ("this product should remove only OLDER
+         versions of itself"); it's correctly describing what we're
+         deliberately asking for, not catching a real mistake, so it's
+         suppressed via -sice:ICE61 in build.cmd's light.exe invocation. -->
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of WgSharp is already installed." />
     <MediaTemplate EmbedCab="yes" />
 
+    <!-- Closing a running WgSharp before files are touched needs TWO
+         mechanisms, since one WgSharp.exe plays two roles:
+
+         (1) The SERVICE (name "WgSharpSvc", the same WgSharp.exe run with a
+             "service" argument as LocalSystem, no window): stopped via
+             <ServiceControl> below, attached to the MainExecutable
+             component, a core Windows Installer feature (the standard
+             StopServices action). The engine itself calls the Service
+             Control Manager's ControlService(STOP) and, with Wait="yes",
+             synchronously waits for it to actually exit, before files are
+             written.
+
+         (2) The GUI/tray process: util:CloseApplication, below. Earlier
+             revisions of this file used CloseMessage alone, which sends a
+             bare WM_CLOSE — and a WM_CLOSE arriving from another process is
+             INDISTINGUISHABLE, at the WinForms level, from the user
+             clicking the title-bar X (both default to
+             CloseReason.UserClosing), so it got swallowed by MainForm's
+             intentional "X minimizes to tray, doesn't exit" behavior
+             instead of actually closing the app. The fix is
+             EndSessionMessage="yes": it sends WM_QUERYENDSESSION/
+             WM_ENDSESSION instead, which .NET WinForms specifically maps to
+             CloseReason.WindowsShutDown — a reason MainForm.OnFormClosing
+             already treats as "really exit" (it only special-cases
+             UserClosing), with no custom code required on our side.
+             ElevatedCloseMessage="yes" is required because WgSharp's
+             manifest forces it to run elevated, so a plain close request
+             wouldn't reach it.
+
+             TerminateProcess="1" with a short Timeout is the actual
+             guarantee, not just a nicety: if the graceful attempts above
+             don't succeed for any reason within the timeout, Setup forcibly
+             terminates the process outright before files are written. This
+             closes off every remaining failure mode (a hung message loop,
+             an unexpected exception during the synchronous in-process
+             tunnel teardown in OnFormClosing, anything) — the exe is
+             guaranteed unlocked by file-write time regardless of how
+             gracefully (or not) WgSharp itself responds. -->
+    <util:CloseApplication Id="CloseWgSharpGui"
+                           Target="WgSharp.exe"
+                           CloseMessage="yes"
+                           EndSessionMessage="yes"
+                           ElevatedCloseMessage="yes"
+                           TerminateProcess="1"
+                           Timeout="5"
+                           RebootPrompt="no"
+                           Description="WgSharp is running and needs to close before Setup can continue. Setup will close it automatically." />
     <Icon Id="WgSharpIcon" SourceFile="$(var.RepoDir)\WgSharp.ico" />
     <Property Id="ARPPRODUCTICON" Value="WgSharpIcon" />
     <Property Id="ARPHELPLINK" Value="https://github.com/inteliboy/WgSharp" />
@@ -71,6 +148,49 @@
     <DirectoryRef Id="INSTALLFOLDER">
       <Component Id="MainExecutable" Guid="*" Win64="yes">
         <File Id="WgSharpExe" Source="$(var.SourceDir)\WgSharp.exe" KeyPath="yes" />
+        <!-- Deterministically stops the background service (service name
+             "WgSharpSvc", see src/core/ServiceInstaller.cs) before files
+             are replaced, on BOTH install and uninstall. This is a core MSI
+             feature (the standard StopServices action), not a custom action
+             or Restart Manager heuristic: Windows Installer itself calls
+             ControlService(SERVICE_CONTROL_STOP) and, with Wait="yes",
+             synchronously waits for it to actually stop, sequenced (by the
+             engine's own standard action order) after InstallValidate but
+             reliably before InstallFiles. That ordering matters: the
+             service runs the exact same WgSharp.exe as the GUI but has no
+             window and never registers for preshutdown notifications, so
+             Restart Manager's own "close and restart" mechanism (which the
+             native Files in Use dialog offers) can detect and list it but
+             can't reliably stop it, exactly the gap that left WgSharp.exe
+             locked and un-replaced even after clicking through that prompt.
+             ServiceControl doesn't have that limitation: it talks to the
+             Service Control Manager directly and is unconditional, so the
+             exe is genuinely unlocked by the time it's written regardless of
+             what Restart Manager did or didn't manage on its own.
+             Remove="uninstall" also deletes the service registration when
+             WgSharp itself is uninstalled, so nothing's left orphaned. -->
+        <ServiceControl Id="StopWgSharpService"
+                        Name="WgSharpSvc"
+                        Stop="both"
+                        Remove="uninstall"
+                        Wait="yes" />
+        <!-- wintun.dll and wireguard.dll are NOT installed by this MSI at
+             all; they're downloaded by WgSharp itself at first run/connect
+             (see WintunDownloader.cs / WireGuardNtDownloader.cs), straight
+             into the exe's own directory (AppDomain.CurrentDomain.
+             BaseDirectory, which for an installed copy is exactly
+             INSTALLFOLDER). Since Windows Installer never tracked them as
+             belonging to any component, a normal uninstall has no idea they
+             exist and would leave them behind, and would likely leave
+             INSTALLFOLDER itself behind too, since MSI only auto-removes a
+             directory once everything in it (including untracked leftovers)
+             is gone. RemoveFile here explicitly deletes them on uninstall
+             even though this component never installed them; the defensive
+             RemoveFolder right after makes sure INSTALLFOLDER itself goes
+             away too once those last two files are cleared out. -->
+        <RemoveFile Id="RemoveWintunDll" Name="wintun.dll" On="uninstall" />
+        <RemoveFile Id="RemoveWireGuardDll" Name="wireguard.dll" On="uninstall" />
+        <RemoveFolder Id="RemoveInstallFolder" Directory="INSTALLFOLDER" On="uninstall" />
       </Component>
       <Component Id="LicenseFile" Guid="*" Win64="yes">
         <File Id="LicenseTxt" Source="$(var.RepoDir)\LICENSE" Name="LICENSE.txt" KeyPath="yes" />

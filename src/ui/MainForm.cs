@@ -30,6 +30,20 @@ namespace WgSharp.Ui
         private StatsPanel _statsPanel;
         private SettingsPanel _settingsPanel;
 
+        // ---------------- tunnel-list drag state (export-out / reorder) ----------------
+        // A drag starting on the list can end one of two ways depending purely on
+        // where it's DROPPED, decided automatically by which clipboard/drag
+        // formats each target understands rather than anything we track about
+        // the cursor's path: dropped back onto lstTunnels itself -> reorder
+        // (lstTunnels's own DragDrop handler recognizes InternalReorderFormat);
+        // dropped anywhere else (Explorer, Desktop, another app) -> export, since
+        // external targets only understand the plain DataFormats.FileDrop data
+        // riding alongside it and ignore our custom format entirely.
+        private const string InternalReorderFormat = "WgSharpTunnelDragIndex";
+        private int _dragStartIndex = -1;
+        private Point _dragStartPoint;
+        private bool _dragCandidate;
+
         // value labels we refresh on each status tick
         private StatusRow _statusRow;
         private Label _valListenPort, _valAddresses, _valDns, _valMtu, _valKeepalive;
@@ -71,7 +85,7 @@ namespace WgSharp.Ui
             bool loaded = false;
             try
             {
-                var names = ConfigStore.List();
+                var names = ApplyTunnelOrder(ConfigStore.List());
                 if (names.Count > 0)
                 {
                     foreach (string n in names) lstTunnels.Items.Add(n);
@@ -404,20 +418,165 @@ namespace WgSharp.Ui
             OnActivateToggle(sender, e);
         }
 
-        // ---------------- drag & drop import onto the tunnel list ----------------
+        // ---------------- right-click context menu + drag start ----------------
+        private void OnTunnelListMouseDown(object sender, MouseEventArgs e)
+        {
+            int index = lstTunnels.IndexFromPoint(e.Location);
+
+            if (e.Button == MouseButtons.Right)
+            {
+                if (index < 0) return;
+                if (lstTunnels.SelectedIndex != index) lstTunnels.SelectedIndex = index;
+                ShowTunnelContextMenu(e.Location);
+                return;
+            }
+
+            if (e.Button == MouseButtons.Left && index >= 0)
+            {
+                // Just remember where a possible drag might start; OnTunnelListMouseMove
+                // decides, once the mouse actually moves past the system drag
+                // threshold, whether this turns into a real drag (vs. just a
+                // click/selection, which MouseDown alone can't distinguish yet).
+                _dragStartIndex = index;
+                _dragStartPoint = e.Location;
+                _dragCandidate = true;
+            }
+        }
+
+        private void OnTunnelListMouseMove(object sender, MouseEventArgs e)
+        {
+            if (!_dragCandidate || e.Button != MouseButtons.Left) return;
+            int dx = Math.Abs(e.X - _dragStartPoint.X), dy = Math.Abs(e.Y - _dragStartPoint.Y);
+            if (dx < SystemInformation.DragSize.Width && dy < SystemInformation.DragSize.Height) return;
+            _dragCandidate = false;
+
+            if (_dragStartIndex < 0 || _dragStartIndex >= lstTunnels.Items.Count) return;
+            string name = lstTunnels.Items[_dragStartIndex].ToString();
+
+            // Carries TWO formats in the same drag, simultaneously — see the
+            // field comment on InternalReorderFormat for why that's what makes
+            // a single drag gesture serve both "reorder" and "export" without
+            // us having to track where the cursor is relative to the list.
+            var data = new DataObject();
+            data.SetData(InternalReorderFormat, _dragStartIndex);
+            string tempPath = PrepareExportTempFile(name);
+            if (tempPath != null) data.SetData(DataFormats.FileDrop, new string[] { tempPath });
+
+            lstTunnels.DoDragDrop(data, DragDropEffects.Move | DragDropEffects.Copy);
+        }
+
+        private void OnTunnelListMouseUp(object sender, MouseEventArgs e)
+        {
+            _dragCandidate = false;
+        }
+
+        private void ShowTunnelContextMenu(Point at)
+        {
+            if (lstTunnels.SelectedIndex < 0) return;
+            string name = lstTunnels.Items[lstTunnels.SelectedIndex].ToString();
+            bool isActiveTunnel = _active && name == _activeTunnelName;
+
+            var menu = new ContextMenuStrip();
+            var toggleItem = new ToolStripMenuItem(isActiveTunnel ? "Disconnect" : "Connect");
+            toggleItem.Click += new EventHandler(OnActivateToggle);
+            menu.Items.Add(toggleItem);
+            menu.Items.Add(new ToolStripSeparator());
+            var removeItem = new ToolStripMenuItem("Remove");
+            removeItem.Click += new EventHandler(OnDeleteClicked);
+            menu.Items.Add(removeItem);
+            menu.Show(lstTunnels, at);
+        }
+
+        /// <summary>
+        /// Writes a tunnel's plaintext config to a temp .conf file for a
+        /// drag-out export. In portable mode, reuses this session's cached
+        /// password for the tunnel if there is one, prompting (and caching)
+        /// otherwise. Returns null (export silently does not occur) if the
+        /// user cancels a password prompt or anything fails — never throws
+        /// into the drag pipeline.
+        ///
+        /// Known rough edge: this runs mid-drag-gesture (from
+        /// OnTunnelListMouseMove, before DoDragDrop starts), so on an
+        /// UNCACHED portable tunnel a modal password prompt pops up WHILE
+        /// the mouse button is still down — which can interrupt the OS's
+        /// own drag tracking. Once a tunnel's password has been used once
+        /// this session (Activate, Edit, an earlier export) it's cached and
+        /// this is a non-issue; only a portable tunnel's very first
+        /// drag-out, with no prior unlock this session, hits it.
+        /// </summary>
+        private string PrepareExportTempFile(string name)
+        {
+            string text;
+            try
+            {
+                if (ConfigStore.RequiresPassword)
+                {
+                    string pw;
+                    if (!_tunnelPasswords.TryGetValue(name, out pw))
+                    {
+                        pw = PasswordDialog.AskExisting(this,
+                            "Enter the password for '" + name + "' to export it.");
+                        if (pw == null) return null; // cancelled
+                    }
+                    text = ConfigStore.Load(name, pw);
+                    _tunnelPasswords[name] = pw;
+                }
+                else
+                {
+                    text = ConfigStore.Load(name);
+                }
+            }
+            catch (Exception ex) { Log("Export of '" + name + "' failed: " + ex.Message); return null; }
+
+            string tempPath = Path.Combine(Path.GetTempPath(), ConfigStore.SanitizeName(name) + ".conf");
+            try { File.WriteAllText(tempPath, text); }
+            catch (Exception ex) { Log("Export temp-file write failed: " + ex.Message); return null; }
+            return tempPath;
+        }
+
+        // ---------------- drag & drop import / export / reorder on the tunnel list ----------------
         private void OnTunnelListDragEnter(object sender, DragEventArgs e)
         {
+            if (e.Data.GetDataPresent(InternalReorderFormat)) { e.Effect = DragDropEffects.Move; return; }
             e.Effect = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
         }
 
         private void OnTunnelListDragDrop(object sender, DragEventArgs e)
         {
+            // Reorder: dropped back onto this same list. Checked FIRST and
+            // returns — a reorder drag also carries FileDrop data (for the
+            // export-out case), so without this check first, dropping back
+            // onto the list would be misread as re-importing the temp file.
+            if (e.Data.GetDataPresent(InternalReorderFormat))
+            {
+                int fromIndex = (int)e.Data.GetData(InternalReorderFormat);
+                if (fromIndex < 0 || fromIndex >= lstTunnels.Items.Count) return;
+
+                Point clientPt = lstTunnels.PointToClient(new Point(e.X, e.Y));
+                int toIndex = lstTunnels.IndexFromPoint(clientPt);
+                if (toIndex < 0) toIndex = lstTunnels.Items.Count - 1; // dropped below the last row -> move to the end
+                if (fromIndex == toIndex) return;
+
+                object item = lstTunnels.Items[fromIndex];
+                lstTunnels.Items.RemoveAt(fromIndex);
+                if (toIndex > fromIndex) toIndex--; // account for the shift the removal just caused
+                if (toIndex < 0) toIndex = 0;
+                if (toIndex > lstTunnels.Items.Count) toIndex = lstTunnels.Items.Count;
+                lstTunnels.Items.Insert(toIndex, item);
+                lstTunnels.SelectedIndex = toIndex;
+                SaveTunnelOrderFromList();
+                return;
+            }
+
             if (!e.Data.GetDataPresent(DataFormats.FileDrop)) return;
             string[] dropped = (string[])e.Data.GetData(DataFormats.FileDrop);
             if (dropped == null || dropped.Length == 0) return;
 
             // Only hand off files with extensions we know how to import; silently
             // skip anything else (e.g. if other file types were dropped alongside).
+            // This also covers AmneziaWG configs transparently — they're still
+            // plain .conf files, just with extra [Interface] keys Config.Parse
+            // already understands, so nothing extra is needed for those here.
             var usable = new System.Collections.Generic.List<string>();
             foreach (string path in dropped)
             {
@@ -474,6 +633,14 @@ namespace WgSharp.Ui
                 _valMtu = FieldGrid.AddRow(gi, "MTU", _config.Mtu.ToString());
             else
                 _valMtu = null;
+
+            // AmneziaWG indicator: only appears for a config that actually
+            // carries the extension keys. Surfaces both that obfuscation is
+            // active AND the backend constraint that comes with it (see
+            // TunnelBackendFactory) right where the user is already looking,
+            // instead of only in the Log tab.
+            if (_config != null && _config.IsAmneziaWg)
+                FieldGrid.AddRow(gi, "Obfuscation", "AmneziaWG (managed backend only)");
 
             grpInterface.Controls.Add(gi);
 
@@ -719,6 +886,44 @@ namespace WgSharp.Ui
                 Hide();
                 return;
             }
+
+            // Actually exiting now (tray Exit, Windows shutdown/logoff,
+            // Task Manager, or an external close request such as the MSI
+            // installer's util:CloseApplication asking us to exit before an
+            // upgrade). If a tunnel is running IN THIS PROCESS (the managed
+            // or WireGuardNT backend, run directly rather than through the
+            // background service), tear it down SYNCHRONOUSLY here, before
+            // letting the close proceed.
+            //
+            // CRITICAL: this must NEVER apply to a RemoteTunnelBackend
+            // (service-driven tunnel). RemoteTunnelBackend.Stop() doesn't
+            // just disconnect the GUI — it calls ServiceInstaller.
+            // StopTunnelService() and clears boot-start, genuinely stopping
+            // the background service itself. The entire point of that
+            // service is to keep the tunnel up across GUI exit/logout/reboot;
+            // calling Stop() here on every ordinary window close (including
+            // Windows shutdown, where the service is specifically supposed
+            // to survive and reconnect before the NEXT login) would silently
+            // defeat that. So: only an in-process backend gets stopped here.
+            //
+            // For that in-process case, this deliberately does NOT reuse
+            // DeactivateTunnel(): that method is async on purpose (so the
+            // window doesn't freeze during normal day-to-day use), but
+            // that's the wrong tradeoff here — the process could exit before
+            // that background work finishes, leaving the kill-switch's WFP
+            // firewall rules and pinned endpoint route stuck in place until
+            // the next launch notices and cleans them up. A direct, blocking
+            // Stop() costs at most roughly a second (WFP filter removal +
+            // adapter teardown) and is the only way to guarantee cleanup
+            // actually completes before the process is gone — acceptable
+            // since the app is closing anyway.
+            if (_tunnel != null && !(_tunnel is RemoteTunnelBackend))
+            {
+                try { _tunnel.Stop(); }
+                catch (Exception ex) { Log("Shutdown tunnel stop error: " + ex.Message); }
+                _tunnel = null;
+            }
+
             base.OnFormClosing(e);
         }
 
@@ -866,14 +1071,16 @@ namespace WgSharp.Ui
                 tunnel = new RemoteTunnelBackend(tunnelNameSnapshot);
                 ((RemoteTunnelBackend)tunnel).ServiceLogLine += LogRaw;
             }
-            else if (AppSettings.UseWireGuardNt)
-            {
-                Log("Using WireGuardNT (kernel) backend.");
-                tunnel = new WireGuardNtTunnel(_config);
-            }
             else
             {
-                tunnel = new Tunnel(_config);
+                bool forcedManaged = TunnelBackendFactory.RequiresManagedBackend(_config) && AppSettings.UseWireGuardNt;
+                if (forcedManaged)
+                    Log("This tunnel uses AmneziaWG, which only the managed backend can speak " +
+                        "(WireGuardNT is closed-source and can't be modified) \u2014 using the managed " +
+                        "backend for this connection, regardless of the WireGuardNT setting.");
+                else if (AppSettings.UseWireGuardNt)
+                    Log("Using WireGuardNT (kernel) backend.");
+                tunnel = TunnelBackendFactory.Create(_config, AppSettings.UseWireGuardNt);
             }
             tunnel.LogMessage += Log;
 
@@ -1124,6 +1331,40 @@ namespace WgSharp.Ui
         }
 
 
+        /// <summary>
+        /// Applies the user's saved drag-to-reorder ordering (AppSettings.
+        /// TunnelOrder) on top of ConfigStore's always-alphabetical List().
+        /// Tunnels not mentioned in the saved order (a fresh install with no
+        /// custom order yet, or a newly imported tunnel) fall back to
+        /// alphabetical, appended after any explicitly-ordered ones — so a
+        /// new import always shows up at the end rather than disappearing or
+        /// jumping to an unexpected position.
+        /// </summary>
+        private System.Collections.Generic.List<string> ApplyTunnelOrder(
+            System.Collections.Generic.List<string> alphabetical)
+        {
+            var ordered = new System.Collections.Generic.List<string>();
+            var remaining = new System.Collections.Generic.HashSet<string>(
+                alphabetical, StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrEmpty(AppSettings.TunnelOrder))
+            {
+                foreach (string n in AppSettings.TunnelOrder.Split('|'))
+                    if (remaining.Remove(n)) ordered.Add(n);
+            }
+            foreach (string n in alphabetical)
+                if (remaining.Contains(n)) { ordered.Add(n); remaining.Remove(n); }
+            return ordered;
+        }
+
+        /// <summary>Persists the tunnel list's current on-screen order as the new custom order.</summary>
+        private void SaveTunnelOrderFromList()
+        {
+            var names = new System.Collections.Generic.List<string>();
+            foreach (object item in lstTunnels.Items) names.Add(item.ToString());
+            AppSettings.TunnelOrder = string.Join("|", names.ToArray());
+            AppSettings.Save();
+        }
+
         private void OnPortableModeChanged()
         {
             // The store location changed; reload the tunnel list from the new store.
@@ -1134,7 +1375,7 @@ namespace WgSharp.Ui
             lstTunnels.Items.Clear();
             try
             {
-                var names = ConfigStore.List();
+                var names = ApplyTunnelOrder(ConfigStore.List());
                 foreach (string n in names) lstTunnels.Items.Add(n);
             }
             catch (Exception ex) { Log("Could not list tunnels: " + ex.Message); }
@@ -1188,6 +1429,7 @@ namespace WgSharp.Ui
             string scanned;
             using (var dlg = new QrScanDialog())
             {
+                dlg.Log += Log; // route camera/scan diagnostics into the Log tab (Debug log gated)
                 if (dlg.ShowDialog(this) != DialogResult.OK) return;
                 scanned = dlg.DecodedText;
             }
@@ -1461,6 +1703,7 @@ namespace WgSharp.Ui
 
             int idx = lstTunnels.SelectedIndex;
             lstTunnels.Items.RemoveAt(idx);
+            SaveTunnelOrderFromList();
             Log("Removed tunnel '" + toRemove + "'.");
 
             if (lstTunnels.Items.Count > 0)

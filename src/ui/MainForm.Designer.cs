@@ -109,6 +109,9 @@ namespace WgSharp.Ui
             this.lstTunnels.AllowDrop = true;
             this.lstTunnels.DragEnter += new DragEventHandler(this.OnTunnelListDragEnter);
             this.lstTunnels.DragDrop += new DragEventHandler(this.OnTunnelListDragDrop);
+            this.lstTunnels.MouseDown += new MouseEventHandler(this.OnTunnelListMouseDown);
+            this.lstTunnels.MouseMove += new MouseEventHandler(this.OnTunnelListMouseMove);
+            this.lstTunnels.MouseUp += new MouseEventHandler(this.OnTunnelListMouseUp);
 
             // ---- left bottom: action buttons ----
             this.pnlButtons.Dock = DockStyle.Bottom;

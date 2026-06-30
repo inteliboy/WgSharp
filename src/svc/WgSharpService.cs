@@ -134,9 +134,10 @@ namespace WgSharp.Svc
                     try { _tunnel.Stop(); } catch (Exception ex) { LogLine("Stop (pre-switch) error: " + ex.Message); }
                     _tunnel = null;
                 }
-                ITunnelBackend tunnel = AppSettings.UseWireGuardNt
-                    ? (ITunnelBackend)new WgSharp.Core.WireGuardNtTunnel(cfg)
-                    : new WgSharp.Core.Tunnel(cfg);
+                if (WgSharp.Core.TunnelBackendFactory.RequiresManagedBackend(cfg) && AppSettings.UseWireGuardNt)
+                    LogLine("This tunnel uses AmneziaWG; using the managed backend for it " +
+                        "(WireGuardNT can't speak AWG) regardless of the WireGuardNT setting.");
+                ITunnelBackend tunnel = WgSharp.Core.TunnelBackendFactory.Create(cfg, AppSettings.UseWireGuardNt);
                 tunnel.LogMessage += LogLine;
                 tunnel.Start();
                 _tunnel = tunnel;

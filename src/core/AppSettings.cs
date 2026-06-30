@@ -19,6 +19,14 @@ namespace WgSharp.Core
         public static bool UseWireGuardNt = true;    // use kernel WireGuardNT backend (default)
         public static bool DebugLog;                 // verbose Log tab output + service log file
         public static bool StartGuiAtLogin;          // launch the GUI (to tray) on user login
+        // User's custom drag-to-reorder ordering for the tunnel list, as the
+        // exact display order, pipe-separated. ConfigStore.List() itself
+        // always returns names alphabetically (that's its job: list what's on
+        // disk); this is purely a display-order override layered on top by
+        // MainForm. Tunnels not mentioned here (new imports, or this being
+        // empty/first-run) fall back to alphabetical, appended after any
+        // explicitly-ordered ones — see MainForm.ApplyTunnelOrder.
+        public static string TunnelOrder = "";
 
         private static string ExeDir
         {
@@ -87,6 +95,8 @@ namespace WgSharp.Core
                         DebugLog = ParseBool(val);
                     else if (key.Equals("StartGuiAtLogin", StringComparison.OrdinalIgnoreCase))
                         StartGuiAtLogin = ParseBool(val);
+                    else if (key.Equals("TunnelOrder", StringComparison.OrdinalIgnoreCase))
+                        TunnelOrder = val;
                 }
             }
             catch { /* defaults on any error */ }
@@ -102,6 +112,7 @@ namespace WgSharp.Core
                 sb.AppendLine("UseWireGuardNt=" + (UseWireGuardNt ? "true" : "false"));
                 sb.AppendLine("DebugLog=" + (DebugLog ? "true" : "false"));
                 sb.AppendLine("StartGuiAtLogin=" + (StartGuiAtLogin ? "true" : "false"));
+                sb.AppendLine("TunnelOrder=" + (TunnelOrder ?? ""));
                 File.WriteAllText(SettingsPath, sb.ToString());
             }
             catch { /* best-effort */ }

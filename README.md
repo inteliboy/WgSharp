@@ -33,6 +33,7 @@ transport data path. A WinForms GUI. All compiled with `csc.exe` alone —
 - [Run](#run)
 - [Sample configuration](#sample-configuration)
 - [Two tunnel backends](#two-tunnel-backends)
+- [AmneziaWG (censorship-resistance obfuscation)](#amneziawg-censorship-resistance-obfuscation)
 - [Kill-switch](#kill-switch)
 - [Background service: reconnect before login](#background-service-reconnect-before-login)
 - [Settings](#settings)
@@ -145,11 +146,54 @@ environment variable, then the usual Program Files path), `build.cmd` skips
 it with a clear `[SKIP]` message and the exe build above is unaffected either
 way — the MSI is a convenience, not a requirement.
 
+**Installing or upgrading automatically closes a running WgSharp** — both the
+GUI and the background service, which are the same exe — before touching
+files:
+
+- The **background service** (`WgSharpSvc`) is stopped via a `<ServiceControl
+  Stop="both" Wait="yes">` element — a core Windows Installer feature where
+  the engine itself calls the Service Control Manager and synchronously waits
+  for the service to actually exit before files are written. Its own shutdown
+  path stops any active tunnel cleanly (kill-switch rules and routes removed)
+  as part of that.
+- The **GUI/tray process** is closed via `util:CloseApplication`, with
+  `EndSessionMessage="yes"` rather than a plain `CloseMessage` alone: a bare
+  `WM_CLOSE` arriving from another process is indistinguishable, at the
+  WinForms level, from the user clicking the title-bar X, so it would get
+  swallowed by the intentional "X minimizes to tray" behavior. `WM_QUERYENDSESSION`
+  (what `EndSessionMessage` sends) maps to a different, unambiguous close
+  reason that `MainForm` already treats as a real exit. As a hard guarantee on
+  top of that, `TerminateProcess="1"` force-closes the process if it's still
+  running after a few seconds — so the file is unlocked no matter what.
+
+Note that `util:CloseApplication` has no UI of its own — these mechanisms work
+silently in the background, without showing a prompt. (Windows Installer's
+separate, optional native "Files in Use" dialog is unrelated and, per
+Microsoft's own documentation, never applies to a process without a visible
+titled window — exactly the background service's case — so it isn't a
+reliable fit for WgSharp regardless.)
+
+Together these guarantee `WgSharp.exe` is genuinely unlocked by the time
+Setup writes the new one, with nothing depending on whether — or how — the
+user interacts with any prompt.
+
 It uses `1.YY.MMDD` — the leading 3 fields of the exe's own `1.YY.MMDD.0`
 (see [Versioning](#versioning) above) — both stamped from one computation in
 `build.cmd`, so there's only ever one date encoding to think about, even
 though Windows Installer's stricter 3-field format keeps the two strings
 from being byte-for-byte identical.
+
+> [!NOTE]
+> Since the version only has day granularity, rebuilding and reinstalling
+> more than once on the same day produces a new MSI with a different
+> ProductCode but an *identical* ProductVersion to the one already
+> installed. Windows Installer doesn't treat that as an upgrade by default —
+> it treats same-version + different-ProductCode as two unrelated products,
+> which silently leaves the old `WgSharp.exe` untouched no matter how
+> cleanly the running processes were closed first. `Product.wxs` sets
+> `AllowSameVersionUpgrades="yes"` specifically to fix this (with WiX's
+> ICE61 validation suppressed in `build.cmd`, since it's correctly flagging
+> exactly the thing being asked for on purpose).
 
 **Installing via the MSI changes WgSharp's defaults**, on the principle that
 a proper install implies "set this up the way I'd actually want it running" —
@@ -171,6 +215,15 @@ a USB stick, a dev build) — those keep today's defaults (everything off,
 portable mode available) exactly as before. The installer itself doesn't
 install/start the service or touch the Windows Firewall directly; that
 first-run behavior happens inside the app itself, the moment it starts.
+
+**Uninstalling removes everything**, including the two files the MSI never
+technically installed in the first place: `wintun.dll` and `wireguard.dll`
+are downloaded by WgSharp itself at runtime (see
+[Run](#run) below) straight into its own folder, so a plain uninstall
+wouldn't know to remove them or be able to delete the now-non-empty install
+folder. `Product.wxs` explicitly cleans both up on uninstall for exactly
+that reason, alongside the background service registration and the
+install directory itself.
 
 ## Run
 
@@ -261,6 +314,76 @@ backend uses its own deterministic adapter identity, so switching back and
 forth doesn't confuse Windows' network-profile matching. If a previous run of
 the WireGuardNT backend didn't shut down cleanly, it automatically recovers by
 opening the existing adapter instead of requiring a reboot.
+
+## AmneziaWG (censorship-resistance obfuscation)
+
+WgSharp can speak [AmneziaWG](https://docs.amnezia.org/documentation/amnezia-wg/)
+("AWG"), a wire-format extension that disguises a WireGuard connection from
+DPI/firewall signature matching — without changing the underlying handshake
+or transport cryptography at all. The actual Noise_IKpsk2 handshake and
+ChaCha20-Poly1305 transport are byte-for-byte standard WireGuard the entire
+time; AWG only adds, at the network I/O boundary:
+
+- **Junk packets** (`Jc`/`Jmin`/`Jmax`) — random noise sent before every
+  handshake attempt, perturbing the connection's size/timing signature.
+- **Header obfuscation** (`H1`–`H4`) — replaces the fixed 4-byte message-type
+  header WireGuard normally uses (the exact thing most DPI signature matching
+  keys on) with four custom values you choose.
+- **Padding** (`S1`/`S2`) — extra random bytes prepended to the handshake
+  messages, so they're no longer the WireGuard-standard 148/92 byte sizes.
+
+**It's recognized automatically from the config file, not a setting you flip.**
+Add any of `Jc`, `Jmin`, `Jmax`, `S1`, `S2`, `H1`, `H2`, `H3`, `H4` to a
+tunnel's `[Interface]` section (the same keys Amnezia's own apps and AWG
+server setup scripts already generate) and WgSharp treats that tunnel as AWG
+automatically — no manual toggle, so an AWG config someone hands you just
+works without them needing to tell you to enable anything:
+
+```ini
+[Interface]
+PrivateKey = ...
+Address = 10.8.1.2/32
+Jc = 4
+Jmin = 40
+Jmax = 70
+S1 = 0
+S2 = 0
+H1 = 1234567891
+H2 = 1234567892
+H3 = 1234567893
+H4 = 1234567894
+
+[Peer]
+PublicKey = ...
+Endpoint = vpn.example.com:51820
+AllowedIPs = 0.0.0.0/0
+```
+
+`Jc`/`Jmin`/`Jmax` must all be present together (or all omitted), same for
+`H1`–`H4`; WgSharp rejects a config that only sets some of a group, since a
+partial set is almost always a typo, and the most common failure mode for a
+mismatched value isn't an error — it's a handshake that silently never
+completes. **Both ends of the tunnel must use identical values** for all of
+these, the same way the static keys themselves must match; there's no
+negotiation.
+
+> [!IMPORTANT]
+> **AWG tunnels always run on the managed backend, never WireGuardNT** —
+> regardless of the Settings → Use WireGuardNT toggle. WireGuardNT is
+> WireGuard LLC's own closed-source, digitally signed kernel driver; WgSharp
+> doesn't own that code and can't change its wire format, so it will never be
+> able to speak AWG's disguised framing. The managed backend is the
+> implementation WgSharp wrote from scratch, where the wire format is
+> genuinely ours to extend. This is enforced automatically
+> (`TunnelBackendFactory`) and surfaced in both the Log tab and the tunnel's
+> own detail panel ("Obfuscation: AmneziaWG (managed backend only)").
+
+A small but deliberate design choice: an AmneziaWG config is only useful if
+*you also control (or can influence) the server side*, since a stock
+WireGuard server has no idea what to do with junk packets, custom headers, or
+padded handshakes — it would just drop them as malformed. If you don't run
+the server, ask whoever does whether they offer AWG-compatible endpoint
+details before relying on this.
 
 ## Kill-switch
 
@@ -356,7 +479,20 @@ Settings persist to `WgSharp.settings` beside the executable.
   files), or `.wgsp` (an encrypted portable export from another WgSharp
   install).
 - **Drag and drop** any of those file types straight onto the tunnel list to
-  import them the same way.
+  import them the same way — including AmneziaWG-extended configs (see
+  [AmneziaWG](#amneziawg-censorship-resistance-obfuscation)), since those are
+  still plain `.conf` files as far as importing is concerned.
+- **Drag a tunnel out** of the list onto Explorer, the desktop, or another
+  app to export it as a `.conf` file. In portable mode this may prompt for
+  that tunnel's password the first time (cached for the rest of the
+  session, like every other action on it).
+- **Right-click** a tunnel for a quick **Connect**/**Disconnect** (whichever
+  applies) and **Remove**.
+- **Drag to reorder** tunnels within the list; the new order is remembered
+  across restarts. The same drag gesture used for reordering is also what
+  exports a tunnel — dropping back onto the list reorders it, dropping
+  anywhere else exports it, decided automatically by where it lands rather
+  than anything you choose up front.
 - **Double-click** a tunnel's name to activate it — or to deactivate it, if
   it's the one currently running.
 - **Scan from QR code** (Add Tunnel menu) imports a tunnel by reading a QR
@@ -388,7 +524,18 @@ library, matching the rest of the project:
   guaranteed to work with every camera. Most UVC webcams still expose the
   compatibility shim it needs; some newer or IR/Windows-Hello-only cameras
   don't. If no usable driver is found, the dialog says so and goes straight to
-  the image-file option.
+  the image-file option. The live preview is drawn by WgSharp itself from the
+  camera's frame callback (not VFW's own preview rendering, which is
+  unreliable across drivers), so what you see is exactly the frames being
+  decoded.
+- **Camera connects but you see nothing (black box, or no image at all)?**
+  That's almost always Windows' camera privacy setting blocking desktop apps,
+  not a WgSharp bug — on Windows 10/11, Settings → Privacy & security →
+  Camera can block Win32 apps from getting image data even after the capture
+  API reports a successful connection. The dialog detects both
+  variants (all-black frames, *and* no frames arriving at all) automatically
+  and shows an **Open camera privacy settings…** button that jumps straight
+  to the right page.
 
 ## Portable mode and passwords
 

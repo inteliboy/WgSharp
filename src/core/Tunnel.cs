@@ -47,7 +47,15 @@ namespace WgSharp.Core
         private readonly object _statusLock = new object();
         private readonly object _hsLock = new object();
 
-        public Tunnel(Config cfg) { _cfg = cfg; }
+        public Tunnel(Config cfg) { _cfg = cfg; _awg = cfg.IsAmneziaWg; }
+
+        // Cached once: true if this tunnel's config carries any AmneziaWG
+        // extension keys. See AwgFraming.cs for what this actually changes —
+        // everywhere _awg gates extra behavior in this file, the surrounding
+        // standard-WireGuard code path is completely untouched when it's
+        // false, so a normal tunnel's behavior is identical to before AWG
+        // support existed.
+        private readonly bool _awg;
 
         private void Log(string m)
         {
@@ -88,6 +96,12 @@ namespace WgSharp.Core
             BuildPeers();
             if (_peers.Count == 0) throw new Exception("No peers in configuration.");
             if (_peers.Count > 1) Log(_peers.Count + " peers configured; routing by AllowedIPs.");
+
+            if (_awg)
+                Log("AmneziaWG mode active (Jc=" + _cfg.EffectiveJc + " Jmin=" + _cfg.EffectiveJmin +
+                    " Jmax=" + _cfg.EffectiveJmax + " S1=" + _cfg.EffectiveS1 + " S2=" + _cfg.EffectiveS2 +
+                    "); disguising the connection. This config can only run on the managed " +
+                    "backend, never WireGuardNT.");
 
             // Assign the interface address.
             AdapterConfig.Log += Log;
@@ -288,10 +302,28 @@ namespace WgSharp.Core
                 if (!p.HasEndpoint || p.Endpoint == null) return;
                 var hs = new Handshake(_cfg.PrivateKey, p.PublicKey, p.PresharedKey);
                 if (p.SavedCookie != null) hs.SeedCookie(p.SavedCookie, p.SavedCookieAt);
-                byte[] init = hs.CreateInitiation();
+                byte[] init = hs.CreateInitiation(); // always standard WireGuard bytes; see Handshake.cs
                 p.Pending = hs;
                 p.LastHandshakeSent = DateTime.UtcNow;
                 p.HandshakeAttempts++;
+
+                // AWG: junk packets first, then the disguised initiation. Both
+                // are sent on EVERY attempt (including retries), not just the
+                // first — a retry is exactly as visible to DPI as the
+                // original attempt, so it gets the same treatment.
+                if (_awg)
+                {
+                    try
+                    {
+                        byte[][] junk = AwgFraming.BuildJunkPackets(_cfg.EffectiveJc, _cfg.EffectiveJmin, _cfg.EffectiveJmax);
+                        foreach (byte[] j in junk)
+                            _udp.SendTo(j, j.Length, p.Endpoint);
+                    }
+                    catch (Exception ex) { Log(WgSharp.Core.Logger.DebugMarker + "AWG junk packet send failed: " + ex.Message); }
+
+                    init = AwgFraming.WrapInitiation(init, _cfg.EffectiveH1, _cfg.EffectiveS1);
+                }
+
                 try { _udp.SendTo(init, init.Length, p.Endpoint); }
                 catch (Exception ex) { Log(WgSharp.Core.Logger.DebugMarker + "Handshake send failed: " + ex.Message); }
                 Log(WgSharp.Core.Logger.DebugMarker + "Handshake initiation sent to peer " + p.Index + " (attempt " + p.HandshakeAttempts + ").");
@@ -412,6 +444,7 @@ namespace WgSharp.Core
                     try
                     {
                         byte[] msg = s.Encrypt(pkt, 0, pkt.Length);
+                        if (_awg) msg = AwgFraming.WrapTransport(msg, _cfg.EffectiveH4);
                         _udp.SendTo(msg, msg.Length, p.Endpoint);
                         p.LastSent = DateTime.UtcNow;
                         lock (_statusLock) _status.TxBytes += pkt.Length;
@@ -431,6 +464,25 @@ namespace WgSharp.Core
                 try { datagram = _udp.ReceiveFrom(out from); }
                 catch (Exception ex) { Log(WgSharp.Core.Logger.DebugMarker + "Inbound recv error: " + ex.Message); continue; }
                 if (datagram == null || datagram.Length == 0) continue;
+
+                if (_awg)
+                {
+                    // Strip the AWG disguise (S-byte padding, H-value header)
+                    // back to a standard WireGuard message before anything
+                    // below this point looks at it — OnResponse, OnCookieReply,
+                    // and Session.Decrypt all expect standard bytes and are
+                    // completely unaware AWG exists. Anything that doesn't
+                    // match the expected shape under our own H/S values is
+                    // noise (e.g. a stray reflected junk packet) and is
+                    // silently dropped, same as a malformed packet always was.
+                    byte[] translated;
+                    AwgFraming.InboundKind kind = AwgFraming.TranslateInbound(
+                        datagram, datagram.Length,
+                        _cfg.EffectiveH2, _cfg.EffectiveH3, _cfg.EffectiveH4, _cfg.EffectiveS2,
+                        out translated);
+                    if (kind == AwgFraming.InboundKind.Unknown) continue;
+                    datagram = translated;
+                }
 
                 byte type = datagram[0];
                 if (type == Messages.TypeResponse)
@@ -577,6 +629,7 @@ namespace WgSharp.Core
             {
                 byte[] empty = new byte[0];
                 byte[] msg = s.Encrypt(empty, 0, 0);
+                if (_awg) msg = AwgFraming.WrapTransport(msg, _cfg.EffectiveH4);
                 _udp.SendTo(msg, msg.Length, p.Endpoint);
                 p.LastSent = DateTime.UtcNow;
             }
