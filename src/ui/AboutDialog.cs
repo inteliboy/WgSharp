@@ -24,7 +24,7 @@ namespace WgSharp.Ui
             MaximizeBox = false;
             MinimizeBox = false;
             ShowInTaskbar = false;
-            ClientSize = new Size(460, 400);
+            ClientSize = new Size(460, 420);
             Font = new Font("Segoe UI", 9F);
 
             // ---- icon, like the original client's About dialog ----
@@ -103,19 +103,47 @@ namespace WgSharp.Ui
             {
                 Text = "Copyright \u00A9 2026 inteliboy",
                 Location = new Point(20, 308),
-                Size = new Size(300, 18),
+                AutoSize = true,
                 ForeColor = Color.FromArgb(0x55, 0x55, 0x55)
             };
+
+            // Measure the copyright text so we can place the GitHub link
+            // exactly one space after it on the same line, regardless of
+            // the user's font scaling or DPI settings.
+            int copyrightW = TextRenderer.MeasureText(
+                copyright.Text + " ", new Font("Segoe UI", 9F)).Width;
 
             var link = new LinkLabel
             {
                 Text = "https://github.com/inteliboy/WgSharp",
-                Location = new Point(20, 328),
-                Size = new Size(300, 18)
+                Location = new Point(20 + copyrightW, 308),
+                AutoSize = true
             };
             link.LinkClicked += delegate
             {
                 try { Process.Start("https://github.com/inteliboy/WgSharp"); } catch { }
+            };
+
+            int coffeeLabelW = TextRenderer.MeasureText(
+                "\u2665 Support this project: ", new Font("Segoe UI", 9F)).Width;
+
+            var coffeeLabel = new Label
+            {
+                Text = "\u2665 Support this project:",
+                Location = new Point(20, 330),
+                AutoSize = true,
+                ForeColor = Color.FromArgb(0x55, 0x55, 0x55)
+            };
+
+            var coffeeLink = new LinkLabel
+            {
+                Text = "buymeacoffee.com/inteliboy",
+                Location = new Point(20 + coffeeLabelW, 330),
+                AutoSize = true
+            };
+            coffeeLink.LinkClicked += delegate
+            {
+                try { Process.Start("https://buymeacoffee.com/inteliboy"); } catch { }
             };
 
             var btnClose = new Button
@@ -133,6 +161,8 @@ namespace WgSharp.Ui
             Controls.Add(credits);
             Controls.Add(copyright);
             Controls.Add(link);
+            Controls.Add(coffeeLabel);
+            Controls.Add(coffeeLink);
             Controls.Add(btnClose);
 
             AcceptButton = btnClose;

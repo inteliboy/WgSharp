@@ -184,7 +184,15 @@ namespace WgSharp.Ui
         public void Start(Control host)
         {
             L("Creating capture window (host " + host.ClientSize.Width + "x" + host.ClientSize.Height + ").");
-            _hwnd = capCreateCaptureWindowA("WgSharp QR scan", WS_CHILD | WS_VISIBLE,
+            // Deliberately NOT WS_VISIBLE: this native VFW window is only a
+            // handle to drive the capture API through (connect, format
+            // negotiation, the frame callback) — it's never meant to be seen.
+            // Frame delivery to OnFrame doesn't depend on the window being
+            // visible (capture and rendering are separate concerns in VFW;
+            // see the WM_CAP_SET_PREVIEW comment below for the bug this
+            // avoids). All visible rendering happens in QrScanDialog's own
+            // PictureBox, painted from the frames OnFrame delivers.
+            _hwnd = capCreateCaptureWindowA("WgSharp QR scan", WS_CHILD,
                 0, 0, host.ClientSize.Width, host.ClientSize.Height, host.Handle, 0);
             if (_hwnd == IntPtr.Zero)
             {
@@ -222,8 +230,20 @@ namespace WgSharp.Ui
             int cbOk = SendMessage(_hwnd, WM_CAP_SET_CALLBACK_FRAME, IntPtr.Zero, cbPtr);
             L("WM_CAP_SET_CALLBACK_FRAME returned " + cbOk + " (nonzero = ok).");
 
-            // Enable VFW's own preview too (harmless if it works; we don't rely
-            // on it). The reliable image path is the callback + our own paint.
+            // We still tell VFW to run "preview" internally (WM_CAP_SET_PREVIEW
+            // below) — this is what actually keeps the underlying frame stream
+            // flowing to our callback; it is NOT the same thing as VFW
+            // rendering anything visibly, since the capture window above was
+            // deliberately created without WS_VISIBLE. An earlier version of
+            // this code created the capture window VISIBLE while ALSO having
+            // VFW's own preview enabled — two independent, uncoordinated
+            // render sources (VFW's native window-paint, and our own
+            // PictureBox repainting from the callback) occupying the exact
+            // same screen area, which is what caused the on-screen image to
+            // flicker uncontrollably even though frames were being decoded
+            // and delivered correctly the whole time. Leaving WM_CAP_SET_
+            // PREVIEW itself enabled (just invisibly) keeps frame delivery
+            // working exactly as before; only the competing visual is gone.
             SendMessage(_hwnd, WM_CAP_SET_PREVIEWRATE, (IntPtr)33, IntPtr.Zero); // ~30 fps
             SendMessage(_hwnd, WM_CAP_SET_SCALE, (IntPtr)1, IntPtr.Zero);
             int prevOk = SendMessage(_hwnd, WM_CAP_SET_PREVIEW, (IntPtr)1, IntPtr.Zero);

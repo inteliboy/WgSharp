@@ -31,17 +31,29 @@ namespace WgSharp.Ui
         private SettingsPanel _settingsPanel;
 
         // ---------------- tunnel-list drag state (export-out / reorder) ----------------
-        // A drag starting on the list can end one of two ways depending purely on
-        // where it's DROPPED, decided automatically by which clipboard/drag
-        // formats each target understands rather than anything we track about
-        // the cursor's path: dropped back onto lstTunnels itself -> reorder
-        // (lstTunnels's own DragDrop handler recognizes InternalReorderFormat);
-        // dropped anywhere else (Explorer, Desktop, another app) -> export, since
-        // external targets only understand the plain DataFormats.FileDrop data
-        // riding alongside it and ignore our custom format entirely.
-        private const string InternalReorderFormat = "WgSharpTunnelDragIndex";
-        private int _dragStartIndex = -1;
+        // A drag starting on the list can end one of two ways depending on
+        // where it's DROPPED: dropped back onto lstTunnels itself -> reorder;
+        // dropped anywhere else (Explorer, Desktop, another app) -> export.
+        //
+        // Which-is-which is tracked via _reorderSourceIndex, a plain field,
+        // rather than a custom format stuffed into the DataObject. An earlier
+        // version used DataObject.SetData("SomeCustomFormat", index) and
+        // checked GetDataPresent for it on drop — that round-trips through
+        // Windows' actual OLE/COM drag-drop machinery even for a same-process,
+        // same-control drag, and a custom non-standard format isn't guaranteed
+        // to survive that intact (unlike DataFormats.FileDrop, a well-known
+        // system format DoDragDrop is built to carry reliably) — which broke
+        // reordering: the custom format silently failed to round-trip, so
+        // every drop fell through to the FileDrop branch and tried to
+        // re-import the dragged tunnel's own temp export file instead of
+        // moving it. A plain field has no such uncertainty: it's set
+        // immediately before the blocking DoDragDrop call and read back the
+        // instant DragDrop fires (DoDragDrop doesn't return until the
+        // gesture ends, so nothing else can race it), with zero dependency
+        // on data marshaling working a particular way.
+        private int _reorderSourceIndex = -1; // valid only while OUR OWN drag is in flight; -1 otherwise
         private Point _dragStartPoint;
+        private int _dragStartIndexCandidate = -1; // tentative; promoted to _reorderSourceIndex only once a real drag starts
         private bool _dragCandidate;
 
         // value labels we refresh on each status tick
@@ -437,7 +449,7 @@ namespace WgSharp.Ui
                 // decides, once the mouse actually moves past the system drag
                 // threshold, whether this turns into a real drag (vs. just a
                 // click/selection, which MouseDown alone can't distinguish yet).
-                _dragStartIndex = index;
+                _dragStartIndexCandidate = index;
                 _dragStartPoint = e.Location;
                 _dragCandidate = true;
             }
@@ -450,19 +462,23 @@ namespace WgSharp.Ui
             if (dx < SystemInformation.DragSize.Width && dy < SystemInformation.DragSize.Height) return;
             _dragCandidate = false;
 
-            if (_dragStartIndex < 0 || _dragStartIndex >= lstTunnels.Items.Count) return;
-            string name = lstTunnels.Items[_dragStartIndex].ToString();
+            if (_dragStartIndexCandidate < 0 || _dragStartIndexCandidate >= lstTunnels.Items.Count) return;
+            string name = lstTunnels.Items[_dragStartIndexCandidate].ToString();
 
-            // Carries TWO formats in the same drag, simultaneously — see the
-            // field comment on InternalReorderFormat for why that's what makes
-            // a single drag gesture serve both "reorder" and "export" without
-            // us having to track where the cursor is relative to the list.
+            // Always carry the exported temp file as FileDrop data — a
+            // well-known system format DoDragDrop is built to round-trip
+            // reliably, so this is what makes export-to-Explorer work. Whether
+            // THIS particular drop turns into a reorder instead is decided in
+            // OnTunnelListDragDrop purely by checking _reorderSourceIndex
+            // (set just below, for the duration of this blocking call) — not
+            // by anything riding inside the DataObject itself.
             var data = new DataObject();
-            data.SetData(InternalReorderFormat, _dragStartIndex);
             string tempPath = PrepareExportTempFile(name);
             if (tempPath != null) data.SetData(DataFormats.FileDrop, new string[] { tempPath });
 
-            lstTunnels.DoDragDrop(data, DragDropEffects.Move | DragDropEffects.Copy);
+            _reorderSourceIndex = _dragStartIndexCandidate;
+            try { lstTunnels.DoDragDrop(data, DragDropEffects.Move | DragDropEffects.Copy); }
+            finally { _reorderSourceIndex = -1; } // drag gesture has ended one way or another
         }
 
         private void OnTunnelListMouseUp(object sender, MouseEventArgs e)
@@ -537,19 +553,25 @@ namespace WgSharp.Ui
         // ---------------- drag & drop import / export / reorder on the tunnel list ----------------
         private void OnTunnelListDragEnter(object sender, DragEventArgs e)
         {
-            if (e.Data.GetDataPresent(InternalReorderFormat)) { e.Effect = DragDropEffects.Move; return; }
+            if (_reorderSourceIndex >= 0) { e.Effect = DragDropEffects.Move; return; }
             e.Effect = e.Data.GetDataPresent(DataFormats.FileDrop) ? DragDropEffects.Copy : DragDropEffects.None;
         }
 
         private void OnTunnelListDragDrop(object sender, DragEventArgs e)
         {
-            // Reorder: dropped back onto this same list. Checked FIRST and
-            // returns — a reorder drag also carries FileDrop data (for the
-            // export-out case), so without this check first, dropping back
-            // onto the list would be misread as re-importing the temp file.
-            if (e.Data.GetDataPresent(InternalReorderFormat))
+            // Reorder: dropped back onto this same list, during our own drag
+            // gesture (_reorderSourceIndex is only ever non-negative for the
+            // duration of OnTunnelListMouseMove's blocking DoDragDrop call —
+            // see the field's doc comment for why this, rather than a custom
+            // DataObject format, is what reliably distinguishes "this drop is
+            // our own reorder" from "this drop is an external file import").
+            // Checked FIRST: a reorder drag also carries FileDrop data (for
+            // the export-out case), so without this check first, dropping
+            // back onto the list would be misread as re-importing the temp
+            // export file instead of moving the item.
+            if (_reorderSourceIndex >= 0)
             {
-                int fromIndex = (int)e.Data.GetData(InternalReorderFormat);
+                int fromIndex = _reorderSourceIndex;
                 if (fromIndex < 0 || fromIndex >= lstTunnels.Items.Count) return;
 
                 Point clientPt = lstTunnels.PointToClient(new Point(e.X, e.Y));
