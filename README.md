@@ -234,7 +234,7 @@ prompt, since creating the network adapter and managing routes/firewall rules
 both require it.
 
 On first startup, WgSharp downloads the native drivers it needs in the
-background, matching the running process's own architecture:
+background:
 
 - `wintun.dll` — always, verified against a pinned SHA-256.
 - `wireguard.dll` (WireGuardNT) — best-effort, for the optional kernel backend,

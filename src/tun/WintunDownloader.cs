@@ -9,7 +9,7 @@ namespace WgSharp.Tun
     /// <summary>
     /// Downloads the official signed wintun.dll from wintun.net and extracts the
     /// architecture-appropriate build next to the executable. The zip lays out
-    /// DLLs as bin/&lt;arch&gt;/wintun.dll for amd64, arm64, arm, and x86.
+    /// DLLs as bin/&lt;arch&gt;/wintun.dll. WgSharp only supports amd64.
     ///
     /// The version and its published SHA-256 are pinned below; bump both together
     /// when a new release ships (check https://www.wintun.net).
@@ -33,37 +33,7 @@ namespace WgSharp.Tun
         }
 
         /// <summary>
-        /// Reads the PE Machine field from a DLL and returns the matching
-        /// arch folder name ("amd64", "arm64", "x86"), or null on any error.
-        /// The PE Machine field is at a fixed offset: the DOS stub's e_lfanew
-        /// (4-byte offset at 0x3C) points to the PE signature, and the Machine
-        /// WORD follows 4 bytes after that (after the "PE\0\0" signature).
-        /// </summary>
-        private static string PeMachineFolder(string dllPath)
-        {
-            try
-            {
-                using (var fs = File.OpenRead(dllPath))
-                using (var br = new System.IO.BinaryReader(fs))
-                {
-                    if (fs.Length < 0x40) return null;
-                    // DOS header: MZ magic at 0, e_lfanew at 0x3C.
-                    fs.Seek(0x3C, SeekOrigin.Begin);
-                    int peOffset = br.ReadInt32();
-                    if (peOffset <= 0 || peOffset + 6 > fs.Length) return null;
-                    // PE signature ("PE\0\0") + Machine WORD.
-                    fs.Seek(peOffset, SeekOrigin.Begin);
-                    uint sig = br.ReadUInt32();
-                    if (sig != 0x00004550) return null; // not "PE\0\0"
-                    ushort machine = br.ReadUInt16();
-                    if (machine == 0xAA64) return "arm64";
-                    if (machine == 0x8664) return "amd64";
-                    if (machine == 0x014c) return "x86";
-                    return null; // unknown
-                }
-            }
-            catch { return null; }
-        }
+
 
         public static bool IsPresent(string targetDir)
         {

@@ -255,17 +255,29 @@
     <UIRef Id="WixUI_Minimal" />
     <UIRef Id="WixUI_ErrorProgressText" />
     <WixVariable Id="WixUILicenseRtf" Value="$(var.RepoDir)\installer\License.rtf" />
-
-    <!-- "Launch WgSharp when Setup exits" checkbox on the Finish dialog.
-         WixShellExec (and the WixCA binary it runs from) come from
-         WixUtilExtension, referenced alongside WixUIExtension in build.cmd. -->
-    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch WgSharp when Setup exits" />
-    <Property Id="WixShellExecTarget" Value="[#WgSharpExe]" />
-    <CustomAction Id="LaunchApplication" BinaryKey="WixCA" DllEntry="WixShellExec" Impersonate="yes" />
+    <!-- Skip the Finish dialog entirely: when the progress bar finishes,
+         the installer closes on its own without showing a Finish screen.
+         WixUI_Minimal wires ProgressDlg's Next to ExitDialog — we override
+         that to EndDialog Return instead, so the installer window closes
+         the moment installation completes. WgSharp is launched via the
+         LaunchApplication custom action in InstallExecuteSequence above. -->
     <UI>
-      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchApplication">
-        WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 and NOT Installed
-      </Publish>
+      <Publish Dialog="ProgressDlg" Control="Next" Event="EndDialog" Value="Return" Order="2">1</Publish>
     </UI>
+
+    <!-- Launch WgSharp automatically after installation completes.
+         Fires from InstallExecuteSequence after InstallFinalize so the exe
+         starts as part of the install transaction. Condition excludes
+         uninstall (REMOVE="ALL") so we don't relaunch on removal.
+         Return="asyncNoWait" means the installer doesn't wait for WgSharp
+         to exit before closing — it launches and moves on. -->
+    <Property Id="WixShellExecTarget" Value="[#WgSharpExe]" />
+    <CustomAction Id="LaunchApplication" BinaryKey="WixCA" DllEntry="WixShellExec"
+                  Impersonate="yes" Return="asyncNoWait" />
+    <InstallExecuteSequence>
+      <Custom Action="LaunchApplication" After="InstallFinalize">
+        NOT REMOVE
+      </Custom>
+    </InstallExecuteSequence>
   </Product>
 </Wix>

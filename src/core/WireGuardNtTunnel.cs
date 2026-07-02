@@ -52,6 +52,7 @@ namespace WgSharp.Core
         private bool _killSwitchEngaged;
         private Thread _poller;
         private Thread _pinger;
+        private bool _routesAll; // true when AllowedIPs covers all traffic (full-tunnel)
         // WireGuardNT's kernel driver handles the handshake internally, so a
         // true handshake RTT isn't available via this API. Latency is instead
         // measured live by PingLoop (periodic ICMP RTT to the endpoint).
@@ -209,6 +210,20 @@ namespace WgSharp.Core
             // once and then sat static. See PingLoop.
             _pinger = new Thread(PingLoop) { IsBackground = true, Name = "wg-nt-ping" };
             _pinger.Start();
+
+            // Split-tunnel wake-up: when AllowedIPs covers only specific addresses,
+            // the WireGuard kernel driver won't attempt a handshake until actual
+            // tunnel traffic appears — there's nothing to send automatically. On
+            // full-tunnel (0.0.0.0/0) the OS generates traffic immediately, so the
+            // handshake completes on its own. For split-tunnel we send one ICMP ping
+            // to the best available in-tunnel target after a short settle delay to
+            // trigger the first handshake and move the state from Negotiating to
+            // Connected without requiring the user to manually generate traffic.
+            if (!_routesAll)
+            {
+                var wakeUp = new Thread(WakeUpPing) { IsBackground = true, Name = "wg-nt-wakeup" };
+                wakeUp.Start();
+            }
         }
 
         // ===========================================================
@@ -375,6 +390,7 @@ namespace WgSharp.Core
             foreach (Config.Peer p in _cfg.Peers)
                 foreach (string cidr in p.AllowedIPs)
                     if (cidr.Replace(" ", "") == "0.0.0.0/0") { ntRoutesAll = true; break; }
+            _routesAll = ntRoutesAll;
 
             foreach (Config.Peer p in _cfg.Peers)
             {
@@ -629,6 +645,35 @@ namespace WgSharp.Core
         // threw can stay unusable.
         private const int PingIntervalMs = 5000;
         private const int PingTimeoutMs = 2000;
+
+        private void WakeUpPing()
+        {
+            // Brief settle: give the routing table time to catch up before sending.
+            for (int i = 0; i < 15 && _running; i++) Thread.Sleep(200);
+            if (!_running) return;
+
+            var targets = BuildTunnelTargets();
+            if (targets.Count == 0) return;
+
+            // Try each candidate once, stop at first success. We don't care about
+            // the RTT here — the only goal is to put one packet into the tunnel so
+            // the kernel driver initiates a handshake and moves out of Negotiating.
+            foreach (IPAddress target in targets)
+            {
+                if (!_running) return;
+                try
+                {
+                    using (var ping = new System.Net.NetworkInformation.Ping())
+                    {
+                        Log(WgSharp.Core.Logger.DebugMarker +
+                            "Split-tunnel wake-up ping to " + target + " (triggers first handshake).");
+                        ping.Send(target, 1500);
+                        return; // packet sent — handshake will follow
+                    }
+                }
+                catch { /* try next candidate */ }
+            }
+        }
 
         private void PingLoop()
         {

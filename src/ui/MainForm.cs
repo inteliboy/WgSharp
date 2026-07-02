@@ -123,18 +123,11 @@ namespace WgSharp.Ui
 
             if (!loaded)
             {
-                // No stored tunnels: start with a sample so the panes aren't empty.
-                _configText =
-                    "[Interface]\r\n" +
-                    "PrivateKey = \r\n" +
-                    "Address = 10.0.0.2/32\r\n\r\n" +
-                    "[Peer]\r\n" +
-                    "PublicKey = \r\n" +
-                    "Endpoint = vpn.example.com:51820\r\n" +
-                    "AllowedIPs = 0.0.0.0/0, ::/0\r\n" +
-                    "PersistentKeepalive = 25\r\n";
-                lstTunnels.Items.Add(_tunnelName);
-                lstTunnels.SelectedIndex = 0;
+                // No stored tunnels — leave the list empty. The detail panes
+                // show their default empty state; the user imports or creates
+                // a tunnel via the Add button.
+                _configText = string.Empty;
+                _tunnelName = string.Empty;
             }
 
             TryParseConfig();
@@ -1124,6 +1117,15 @@ namespace WgSharp.Ui
                         statusTimer.Start();
                         lstTunnels.Invalidate();
                         Log("Detected an already-active tunnel '" + name + "' from the background service.");
+                        // Immediately fetch the service's buffered log so the
+                        // Log tab isn't empty while waiting for the first 1s
+                        // timer tick. Do it on a background thread so the UI
+                        // thread isn't blocked by the pipe call.
+                        var rt = tunnel as RemoteTunnelBackend;
+                        if (rt != null) ThreadPool.QueueUserWorkItem(delegate
+                        {
+                            try { rt.PumpServiceLog(); } catch { }
+                        });
                     }));
                 }
                 catch (ObjectDisposedException) { }
@@ -1211,6 +1213,13 @@ namespace WgSharp.Ui
                         statusTimer.Start();
                         lstTunnels.Invalidate();
                         Log("Tunnel '" + tunnelNameSnapshot + "' activated.");
+                        // Immediately fetch buffered service log so it appears
+                        // without waiting for the first 1s timer tick.
+                        var rtb = _tunnel as RemoteTunnelBackend;
+                        if (rtb != null) ThreadPool.QueueUserWorkItem(delegate
+                        {
+                            try { rtb.PumpServiceLog(); } catch { }
+                        });
                     }));
                 }
                 catch (ObjectDisposedException) { }
