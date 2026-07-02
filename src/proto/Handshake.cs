@@ -150,9 +150,9 @@ namespace WgSharp.Proto
             Kdf.Derive2(_ck, ss, out ckTmp2, out k2);
             _ck = ckTmp2;
             Array.Clear(ss, 0, ss.Length);   // DH output — wipe immediately after use
-            Array.Clear(k2, 0, k2.Length);   // static encryption key — no longer needed
             byte[] timestamp = Tai64N.Now();
             byte[] encTs = ChaCha20Poly1305.Encrypt(k2, ZeroNonce, timestamp, _h);
+            Array.Clear(k2, 0, k2.Length);   // static encryption key — wipe after use
             Array.Copy(encTs, 0, msg, Messages.Init_EncTimestamp, encTs.Length);
             MixHash(encTs);
 
