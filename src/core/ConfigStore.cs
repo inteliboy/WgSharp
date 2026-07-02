@@ -113,6 +113,11 @@ namespace WgSharp.Core
             }
             byte[] plain = ProtectedData.Unprotect(data, Entropy, DataProtectionScope.LocalMachine);
             string text = Encoding.UTF8.GetString(plain);
+            // Zero the intermediate byte array immediately — the plaintext config
+            // (including the private key line) is now only in `text`. Managed
+            // strings are immutable and GC-movable, so we can't zero `text`
+            // itself; it will linger until GC collects it. The key material is
+            // extracted into byte[] by Config.Parse and then wiped by Tunnel.Stop().
             Array.Clear(plain, 0, plain.Length);
             return text;
         }

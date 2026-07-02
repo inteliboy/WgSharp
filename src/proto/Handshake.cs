@@ -138,6 +138,8 @@ namespace WgSharp.Proto
             Kdf.Derive2(_ck, es, out ckTmp1, out k1);
             _ck = ckTmp1;
             byte[] encStatic = ChaCha20Poly1305.Encrypt(k1, ZeroNonce, _staticPublic, _h);
+            Array.Clear(es, 0, es.Length);   // DH output — wipe immediately after use
+            Array.Clear(k1, 0, k1.Length);   // ephemeral encryption key — no longer needed
             Array.Copy(encStatic, 0, msg, Messages.Init_EncStatic, encStatic.Length);
             MixHash(encStatic);
 
@@ -147,6 +149,8 @@ namespace WgSharp.Proto
             byte[] ckTmp2;
             Kdf.Derive2(_ck, ss, out ckTmp2, out k2);
             _ck = ckTmp2;
+            Array.Clear(ss, 0, ss.Length);   // DH output — wipe immediately after use
+            Array.Clear(k2, 0, k2.Length);   // static encryption key — no longer needed
             byte[] timestamp = Tai64N.Now();
             byte[] encTs = ChaCha20Poly1305.Encrypt(k2, ZeroNonce, timestamp, _h);
             Array.Copy(encTs, 0, msg, Messages.Init_EncTimestamp, encTs.Length);
@@ -225,10 +229,12 @@ namespace WgSharp.Proto
             // Ck = KDF1(Ck, DH(e, Er))
             byte[] ee = Curve25519.ScalarMult(_ephemeralPrivate, peerEphemeral);
             MixKey(ee);
+            Array.Clear(ee, 0, ee.Length); // DH output — wipe immediately
 
             // Ck = KDF1(Ck, DH(s, Er))
             byte[] se = Curve25519.ScalarMult(_staticPrivate, peerEphemeral);
             MixKey(se);
+            Array.Clear(se, 0, se.Length); // DH output — wipe immediately
 
             // (Ck, t, k) = KDF3(Ck, PSK); H = HASH(H || t)
             byte[] k = MixKeyAndHash(_presharedKey);
@@ -237,6 +243,7 @@ namespace WgSharp.Proto
             byte[] encEmpty = new byte[16];
             Array.Copy(msg, Messages.Resp_EncEmpty, encEmpty, 0, 16);
             byte[] plain = ChaCha20Poly1305.Decrypt(k, ZeroNonce, encEmpty, _h);
+            Array.Clear(k, 0, k.Length); // temporary AEAD key — wipe after decrypt
             if (plain == null) return null; // auth failure
             MixHash(encEmpty);
 
@@ -252,10 +259,17 @@ namespace WgSharp.Proto
                 RemoteIndex = senderIndex
             };
 
-            // wipe handshake secrets
+            // wipe handshake secrets — these are no longer needed once transport
+            // keys are derived, and the static private key in particular should
+            // not linger in memory any longer than necessary.
             Array.Clear(_ck, 0, 32);
             Array.Clear(_h, 0, 32);
-            if (_ephemeralPrivate != null) Array.Clear(_ephemeralPrivate, 0, _ephemeralPrivate.Length);
+            if (_ephemeralPrivate != null) { Array.Clear(_ephemeralPrivate, 0, _ephemeralPrivate.Length); _ephemeralPrivate = null; }
+            // _staticPrivate and _presharedKey are held by reference from the
+            // Config object (same array, not a copy) — zeroing them here would
+            // wipe the Config's copy too, which we don't want mid-session if
+            // a rekey is needed. They are wiped by Tunnel.Stop() instead, after
+            // the last session ends and no further handshakes can occur.
             return keys;
         }
 

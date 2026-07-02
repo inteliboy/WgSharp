@@ -78,10 +78,43 @@ namespace WgSharp.Core
                 AppSettings.StartGuiAtLogin = true;
                 AppSettings.PortableMode = false; // already the default; explicit for clarity
                 try { LoginAutostart.Enable(); } catch { }
-                try { if (!ServiceInstaller.IsInstalled()) ServiceInstaller.Install(); } catch { }
+                try
+                {
+                    if (!ServiceInstaller.IsInstalled())
+                    {
+                        ServiceInstaller.Install();
+                        AppSettings.ServiceWasInstalled = true;
+                    }
+                }
+                catch { }
                 AppSettings.Save();
             }
             catch { /* never block startup over this */ }
+        }
+
+        /// <summary>
+        /// Called on every GUI launch from the installed location. If the
+        /// user previously had the background service registered (recorded
+        /// in AppSettings.ServiceWasInstalled) but it's now missing — which
+        /// happens after an MSI upgrade, since the MSI removes and reinstalls
+        /// the exe but doesn't re-register the service — silently re-register
+        /// it. This restores the user's last known intent without them having
+        /// to open Settings and re-check the box manually after every upgrade.
+        /// Safe: Install() is idempotent and doesn't start or configure the
+        /// service, it only registers it with SCM.
+        /// </summary>
+        public static void RestoreServiceIfUpgradeWipedIt()
+        {
+            if (!IsInstalled()) return;
+            if (!AppSettings.ServiceWasInstalled) return; // user never had it on
+            if (ServiceInstaller.IsInstalled()) return;   // still registered; nothing to do
+            try
+            {
+                ServiceInstaller.Install();
+                // No need to update ServiceWasInstalled — it's already true.
+                // No Save() needed either: the flag hasn't changed value.
+            }
+            catch { /* never block startup */ }
         }
 
         /// <summary>

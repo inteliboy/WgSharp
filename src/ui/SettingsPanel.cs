@@ -21,16 +21,17 @@ namespace WgSharp.Ui
         private readonly CheckBox _guiAutoStart;
         private readonly Label _guiAutoStartHelp;
         private readonly CheckBox _debugLog;
+        private readonly CheckBox _experimental;
         private bool _loading;
 
         public event Action PortableModeChanged;
+        public event Action ExperimentalFeaturesChanged;
 
         public SettingsPanel()
         {
             Dock = DockStyle.Fill;
             BackColor = AppTheme.PanelBg;
             Padding = new Padding(10);
-            AutoScroll = true;   // extra options can exceed the window height
 
             _portable = new CheckBox
             {
@@ -45,8 +46,8 @@ namespace WgSharp.Ui
                 Text = "Stores tunnel configs in a \"conf\" folder next to the app, password-" +
                        "encrypted instead of using Windows DPAPI, so they can travel with the " +
                        "app folder to another machine.",
-                Location = new Point(36, 32),
-                Size = new Size(450, 40),
+                Location = new Point(36, 30),
+                Size = new Size(450, 36),
                 ForeColor = AppTheme.FieldLabel
             };
             _portable.CheckedChanged += OnPortableChanged;
@@ -54,7 +55,7 @@ namespace WgSharp.Ui
             _wgNt = new CheckBox
             {
                 Text = "Use WireGuardNT (kernel) backend",
-                Location = new Point(16, 78),
+                Location = new Point(16, 70),
                 Size = new Size(340, 22),
                 ForeColor = AppTheme.FieldValue,
                 Font = new Font("Segoe UI", 9.5F, FontStyle.Bold)
@@ -64,8 +65,8 @@ namespace WgSharp.Ui
                 Text = "Uses the official kernel WireGuard driver for higher throughput, " +
                        "instead of the built-in managed implementation. Recommended; on by " +
                        "default. Takes effect on the next connect.",
-                Location = new Point(36, 100),
-                Size = new Size(450, 40),
+                Location = new Point(36, 92),
+                Size = new Size(450, 36),
                 ForeColor = AppTheme.FieldLabel
             };
             _wgNt.CheckedChanged += OnWgNtChanged;
@@ -73,7 +74,7 @@ namespace WgSharp.Ui
             _autoStart = new CheckBox
             {
                 Text = "Start with Windows (background service)",
-                Location = new Point(16, 146),
+                Location = new Point(16, 132),
                 Size = new Size(380, 22),
                 ForeColor = AppTheme.FieldValue,
                 Font = new Font("Segoe UI", 9.5F, FontStyle.Bold)
@@ -84,8 +85,8 @@ namespace WgSharp.Ui
                        "automatically, even before you log in. Only works with the normal " +
                        "(non-portable) store, since the service has no one around to type a " +
                        "password for a portable tunnel.",
-                Location = new Point(36, 168),
-                Size = new Size(450, 50),
+                Location = new Point(36, 154),
+                Size = new Size(450, 44),
                 ForeColor = AppTheme.FieldLabel
             };
             _autoStart.CheckedChanged += OnAutoStartChanged;
@@ -93,7 +94,7 @@ namespace WgSharp.Ui
             _guiAutoStart = new CheckBox
             {
                 Text = "Start GUI at login (in the tray)",
-                Location = new Point(16, 224),
+                Location = new Point(16, 202),
                 Size = new Size(380, 22),
                 ForeColor = AppTheme.FieldValue,
                 Font = new Font("Segoe UI", 9.5F, FontStyle.Bold)
@@ -104,8 +105,8 @@ namespace WgSharp.Ui
                        "you log in, like the official client. Independent of the background " +
                        "service above: that reconnects your tunnel before login; this just " +
                        "puts the tray icon there for you.",
-                Location = new Point(36, 246),
-                Size = new Size(450, 50),
+                Location = new Point(36, 224),
+                Size = new Size(450, 44),
                 ForeColor = AppTheme.FieldLabel
             };
             _guiAutoStart.CheckedChanged += OnGuiAutoStartChanged;
@@ -113,7 +114,7 @@ namespace WgSharp.Ui
             _debugLog = new CheckBox
             {
                 Text = "Debug log",
-                Location = new Point(16, 302),
+                Location = new Point(16, 272),
                 Size = new Size(300, 22),
                 ForeColor = AppTheme.FieldValue,
                 Font = new Font("Segoe UI", 9.5F, FontStyle.Bold)
@@ -124,11 +125,29 @@ namespace WgSharp.Ui
                        "service writes a service.log file. When off (default) only the most " +
                        "meaningful messages are shown and no service.log is written, to avoid " +
                        "constant disk writes.",
-                Location = new Point(36, 324),
-                Size = new Size(450, 50),
+                Location = new Point(36, 294),
+                Size = new Size(450, 40),
                 ForeColor = AppTheme.FieldLabel
             };
             _debugLog.CheckedChanged += OnDebugLogChanged;
+
+            _experimental = new CheckBox
+            {
+                Text = "Show experimental features",
+                Location = new Point(16, 338),
+                Size = new Size(450, 22),
+                ForeColor = AppTheme.FieldValue,
+                Font = new Font("Segoe UI", 9.5F, FontStyle.Bold)
+            };
+            var experimentalHelp = new Label
+            {
+                Text = "Enables features that are functional but not yet fully reliable on all hardware, " +
+                       "such as scanning a QR code from the webcam.",
+                Location = new Point(36, 360),
+                Size = new Size(450, 30),
+                ForeColor = AppTheme.FieldLabel
+            };
+            _experimental.CheckedChanged += OnExperimentalChanged;
 
             Controls.Add(_portable);
             Controls.Add(_portableHelp);
@@ -140,6 +159,8 @@ namespace WgSharp.Ui
             Controls.Add(_guiAutoStartHelp);
             Controls.Add(_debugLog);
             Controls.Add(debugLogHelp);
+            Controls.Add(_experimental);
+            Controls.Add(experimentalHelp);
         }
 
         public void LoadFromSettings()
@@ -156,6 +177,7 @@ namespace WgSharp.Ui
             try { _guiAutoStart.Checked = LoginAutostart.IsEnabled(); }
             catch { _guiAutoStart.Checked = false; }
             _debugLog.Checked = AppSettings.DebugLog;
+            _experimental.Checked = AppSettings.ExperimentalFeatures;
             UpdateExclusivityEnabled();
             _loading = false;
         }
@@ -201,10 +223,14 @@ namespace WgSharp.Ui
                 if (_autoStart.Checked)
                 {
                     ServiceInstaller.Install();
+                    AppSettings.ServiceWasInstalled = true;
+                    AppSettings.Save();
                 }
                 else
                 {
                     ServiceInstaller.Uninstall();
+                    AppSettings.ServiceWasInstalled = false;
+                    AppSettings.Save();
                 }
             }
             catch (Exception ex)
@@ -253,6 +279,15 @@ namespace WgSharp.Ui
             if (_loading) return;
             AppSettings.DebugLog = _debugLog.Checked;
             AppSettings.Save();
+        }
+
+        private void OnExperimentalChanged(object sender, EventArgs e)
+        {
+            if (_loading) return;
+            AppSettings.ExperimentalFeatures = _experimental.Checked;
+            AppSettings.Save();
+            var h = ExperimentalFeaturesChanged;
+            if (h != null) h();
         }
 
         private void OnPortableChanged(object sender, EventArgs e)

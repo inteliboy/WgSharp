@@ -160,6 +160,36 @@ namespace WgSharp.Core
                 }
             }
 
+            // For split-tunnel configs (AllowedIPs doesn't cover everything), any
+            // DNS server configured on the tunnel interface MUST be reachable via
+            // the tunnel — because the OS will send DNS queries out through it. If
+            // the DNS server's IP isn't covered by AllowedIPs, those queries go into
+            // the tunnel but there's no route back, so the handshake stalls waiting
+            // for a response that can never arrive. Fix: add a /32 host route through
+            // the tunnel for every DNS server not already covered by AllowedIPs. This
+            // is exactly what the official WireGuard client does under "wg-quick".
+            // Skipped for full-tunnel (everything is already covered) and skipped
+            // for servers already covered by an existing AllowedIPs entry (no point
+            // adding a redundant more-specific route in that case).
+            // Install the hidden DNS routes (computed in BuildPeers) as tunnel
+            // interface routes — the OS-routing half of treating them as
+            // AllowedIPs. Combined with the _router.Add done in BuildPeers, a
+            // DNS server not listed in AllowedIPs is now handled EXACTLY as if
+            // the user had added it manually (which they confirmed works): the
+            // OS routes its packets to the tunnel adapter, AND the outbound
+            // loop's AllowedIPs lookup now matches it so those packets are
+            // actually encrypted and sent rather than dropped. Not shown in the
+            // visible AllowedIPs — it's an implied route, like wg-quick's DNS
+            // handling.
+            foreach (string dnsCidr in _hiddenDnsRoutes)
+            {
+                IPAddress dnsDest; int dnsPrefix;
+                if (!AdapterConfig.TryParseCidr(dnsCidr, out dnsDest, out dnsPrefix)) continue;
+                Log("DNS server " + dnsCidr + " isn't in AllowedIPs; routing it through the tunnel " +
+                    "automatically so DNS resolves (implied route, not shown in AllowedIPs).");
+                AdapterConfig.AddRoute(luid, dnsDest, dnsPrefix);
+            }
+
             // Force a low, fixed interface metric. A per-route metric=0 alone isn't
             // always enough — Windows can compute the EFFECTIVE metric as interface
             // metric + route metric, and a virtual adapter's automatic interface
@@ -202,6 +232,66 @@ namespace WgSharp.Core
                 foreach (string cidr in cp.AllowedIPs)
                     _router.Add(cidr, _peers.Count - 1); // index within _peers
             }
+
+            // Hidden DNS routing (see AddHiddenDnsRoutes / _hiddenDnsRoutes):
+            // ensure any DNS server not already covered by AllowedIPs is still
+            // TUNNELED. This is the routing half of "add the DNS server to
+            // AllowedIPs" — without adding it to the router, the outbound loop's
+            // Lookup returns -1 for DNS packets and drops them, so DNS queries
+            // never leave even if an OS route exists. We attribute these to the
+            // first peer (the one carrying the tunnel), matching how a single-
+            // peer config's DNS would be handled if it were listed in AllowedIPs.
+            _hiddenDnsRoutes = ComputeHiddenDnsRoutes();
+            if (_peers.Count > 0)
+                foreach (string dnsCidr in _hiddenDnsRoutes)
+                    _router.Add(dnsCidr, 0);
+        }
+
+        // DNS-server /32s that we route through the tunnel WITHOUT listing them
+        // in the visible AllowedIPs — computed once in BuildPeers, reused when
+        // installing OS routes. Only populated for split-tunnel configs where a
+        // DNS server isn't already covered by a real AllowedIPs entry.
+        private System.Collections.Generic.List<string> _hiddenDnsRoutes =
+            new System.Collections.Generic.List<string>();
+
+        private System.Collections.Generic.List<string> ComputeHiddenDnsRoutes()
+        {
+            var result = new System.Collections.Generic.List<string>();
+            if (RoutesAllTraffic()) return result; // full-tunnel already covers everything
+
+            var dnsServers = _cfg.DnsServers();
+            if (dnsServers.Count == 0) return result;
+
+            // Flatten all AllowedIPs (v4) for coverage checks.
+            var allowedCidrs = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<uint, int>>();
+            foreach (Config.Peer cp in _cfg.Peers)
+                foreach (string allowed in cp.AllowedIPs)
+                {
+                    IPAddress dest; int prefix;
+                    if (!AdapterConfig.TryParseCidr(allowed, out dest, out prefix)) continue;
+                    if (dest.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) continue;
+                    byte[] db = dest.GetAddressBytes();
+                    uint net = (uint)(db[0] << 24 | db[1] << 16 | db[2] << 8 | db[3]);
+                    allowedCidrs.Add(new System.Collections.Generic.KeyValuePair<uint, int>(net, prefix));
+                }
+
+            foreach (string srv in dnsServers)
+            {
+                IPAddress srvIp;
+                if (!IPAddress.TryParse(srv, out srvIp)) continue;
+                if (srvIp.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) continue; // v4 only
+                byte[] sb = srvIp.GetAddressBytes();
+                uint srvUint = (uint)(sb[0] << 24 | sb[1] << 16 | sb[2] << 8 | sb[3]);
+                bool covered = false;
+                foreach (var cidr in allowedCidrs)
+                {
+                    if (cidr.Value == 0) { covered = true; break; }
+                    uint mask = cidr.Value == 32 ? 0xFFFFFFFFu : ~(0xFFFFFFFFu >> cidr.Value);
+                    if ((srvUint & mask) == (cidr.Key & mask)) { covered = true; break; }
+                }
+                if (!covered) result.Add(srv + "/32");
+            }
+            return result;
         }
 
         public void Stop()
@@ -228,11 +318,25 @@ namespace WgSharp.Core
                     catch (Exception ex) { Log(WgSharp.Core.Logger.DebugMarker + "Endpoint route cleanup error: " + ex.Message); }
                     p.EndpointPinned = false;
                 }
+                // Dispose CNG key handles held by the session (if any).
+                if (p.Session != null) { try { p.Session.Dispose(); } catch { } p.Session = null; }
+                if (p.Pending != null) { p.Pending = null; }
             }
 
             if (_udp != null) { _udp.Dispose(); _udp = null; }
             if (_adapter != null) { _adapter.Dispose(); _adapter = null; }
             _peers.Clear();
+
+            // Wipe private key material from the Config object now that the
+            // tunnel is fully stopped and no thread can be using it any more.
+            // The Config object itself stays alive (held by whoever called
+            // Tunnel(cfg)), but its sensitive fields are zeroed so a memory
+            // dump taken after disconnect won't expose them.
+            if (_cfg.PrivateKey != null) Array.Clear(_cfg.PrivateKey, 0, _cfg.PrivateKey.Length);
+            if (_cfg.PresharedKey != null) Array.Clear(_cfg.PresharedKey, 0, _cfg.PresharedKey.Length);
+            foreach (Config.Peer p in _cfg.Peers)
+                if (p.PresharedKey != null) Array.Clear(p.PresharedKey, 0, p.PresharedKey.Length);
+
             lock (_statusLock) _status.State = "Idle";
             Log("Tunnel stopped.");
         }
@@ -367,6 +471,8 @@ namespace WgSharp.Core
                 long rtt = (long)(DateTime.UtcNow - p.LastHandshakeSent).TotalMilliseconds;
                 if (rtt >= 0 && rtt < 60000) p.LatencyMs = rtt;
                 p.Pending = null;
+                Log(WgSharp.Core.Logger.DebugMarker + "Crypto backend: " +
+                    (p.Session.UsingCng ? "CNG (hardware-accelerated ChaCha20-Poly1305)" : "managed (pure .NET fallback)") + ".");
 
                 lock (_statusLock)
                 {
@@ -377,6 +483,22 @@ namespace WgSharp.Core
                 }
                 Log("Handshake complete with peer " + p.Index + " (local=" + keys.LocalIndex +
                     " remote=" + keys.RemoteIndex + ").");
+
+                // Send an immediate keepalive (empty transport packet) to the
+                // server as soon as the session is established. This is the
+                // missing piece for split-tunnel configs: the handshake
+                // initiation/response exchange proves the cryptographic identity
+                // of both sides, but many servers don't mark the peer as
+                // "active" for routing purposes until they see a real transport
+                // packet from us — even an empty one. Without this, the tunnel
+                // shows "Negotiating" indefinitely on a split-tunnel config
+                // because no traffic flows naturally to trigger the first send
+                // (unlike full-tunnel, where the OS floods traffic immediately).
+                // Sending this here rather than from TimerLoop means we never
+                // have to wait up to the PersistentKeepalive interval for the
+                // server to acknowledge us. wg-quick achieves the same effect
+                // via a PostUp ping; this is the equivalent, done in-process.
+                SendKeepalive(p);
 
                 if (_cfg.BlockUntunneled && !_killSwitchEngaged)
                 {
@@ -589,7 +711,9 @@ namespace WgSharp.Core
                         if (Timers.SessionExpired(age))
                         {
                             Log("Session (peer " + p.Index + ") expired; dropping.");
+                            Session old = p.Session;
                             p.Session = null;
+                            if (old != null) try { old.Dispose(); } catch { }
                         }
 
                         double sinceSent = (now - p.LastSent).TotalSeconds;

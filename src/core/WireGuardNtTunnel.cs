@@ -371,6 +371,11 @@ namespace WgSharp.Core
             catch (Exception ex) { Log(WgSharp.Core.Logger.DebugMarker + "MTU set skipped: " + ex.Message); }
 
             // Routes from each peer's AllowedIPs.
+            bool ntRoutesAll = false;
+            foreach (Config.Peer p in _cfg.Peers)
+                foreach (string cidr in p.AllowedIPs)
+                    if (cidr.Replace(" ", "") == "0.0.0.0/0") { ntRoutesAll = true; break; }
+
             foreach (Config.Peer p in _cfg.Peers)
             {
                 foreach (string cidr in p.AllowedIPs)
@@ -379,6 +384,55 @@ namespace WgSharp.Core
                     if (!WgSharp.Tun.AdapterConfig.TryParseCidr(cidr, out dest, out prefix)) continue;
                     try { WgSharp.Tun.AdapterConfig.AddRouteForAllowedIp(luid, dest, prefix); }
                     catch (Exception ex) { Log(WgSharp.Core.Logger.DebugMarker + "Route " + cidr + " skipped: " + ex.Message); }
+                }
+            }
+
+            // If a configured DNS server isn't covered by AllowedIPs, route it
+            // through the tunnel automatically (implied route, not shown in
+            // AllowedIPs) so DNS resolves — the same fix as the managed
+            // backend. For the kernel driver, the OS route into the adapter is
+            // what matters here; a single-peer tunnel accepts the packets. If
+            // you use split-tunnel DNS with MULTIPLE peers on WireGuardNT, list
+            // the DNS server in the intended peer's AllowedIPs explicitly so
+            // the driver's crypto-routing sends it to the right peer.
+            if (!ntRoutesAll)
+            {
+                var ntDnsServers = _cfg.DnsServers();
+                if (ntDnsServers.Count > 0)
+                {
+                    var ntAllowed = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<uint, int>>();
+                    foreach (Config.Peer p in _cfg.Peers)
+                        foreach (string cidr in p.AllowedIPs)
+                        {
+                            IPAddress dest; int prefix;
+                            if (!WgSharp.Tun.AdapterConfig.TryParseCidr(cidr, out dest, out prefix)) continue;
+                            if (dest.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) continue;
+                            byte[] db = dest.GetAddressBytes();
+                            uint net = (uint)(db[0] << 24 | db[1] << 16 | db[2] << 8 | db[3]);
+                            ntAllowed.Add(new System.Collections.Generic.KeyValuePair<uint, int>(net, prefix));
+                        }
+                    foreach (string srv in ntDnsServers)
+                    {
+                        IPAddress srvIp;
+                        if (!IPAddress.TryParse(srv, out srvIp)) continue;
+                        if (srvIp.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) continue;
+                        byte[] sb = srvIp.GetAddressBytes();
+                        uint srvUint = (uint)(sb[0] << 24 | sb[1] << 16 | sb[2] << 8 | sb[3]);
+                        bool covered = false;
+                        foreach (var cidr in ntAllowed)
+                        {
+                            if (cidr.Value == 0) { covered = true; break; }
+                            uint mask = cidr.Value == 32 ? 0xFFFFFFFFu : ~(0xFFFFFFFFu >> cidr.Value);
+                            if ((srvUint & mask) == (cidr.Key & mask)) { covered = true; break; }
+                        }
+                        if (!covered)
+                        {
+                            Log("DNS server " + srv + " isn't in AllowedIPs; routing it through the " +
+                                "tunnel automatically so DNS resolves (implied route).");
+                            try { WgSharp.Tun.AdapterConfig.AddRoute(luid, srvIp, 32); }
+                            catch (Exception ex) { Log(WgSharp.Core.Logger.DebugMarker + "DNS route for " + srv + " failed: " + ex.Message); }
+                        }
+                    }
                 }
             }
 
@@ -432,6 +486,14 @@ namespace WgSharp.Core
             _adapter = IntPtr.Zero;
 
             if (_dll != IntPtr.Zero) { try { FreeLibrary(_dll); } catch { } _dll = IntPtr.Zero; }
+
+            // Wipe private key material from the Config now that the adapter is
+            // fully closed and no further operations can use it.
+            if (_cfg.PrivateKey != null) Array.Clear(_cfg.PrivateKey, 0, _cfg.PrivateKey.Length);
+            if (_cfg.PresharedKey != null) Array.Clear(_cfg.PresharedKey, 0, _cfg.PresharedKey.Length);
+            foreach (Config.Peer p in _cfg.Peers)
+                if (p.PresharedKey != null) Array.Clear(p.PresharedKey, 0, p.PresharedKey.Length);
+
             lock (_statusLock) _status.State = "Idle";
             Log("WireGuardNT tunnel stopped.");
         }

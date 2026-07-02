@@ -1,47 +1,45 @@
 using System;
-using System.IO;
+using Microsoft.Win32;
 
 namespace WgSharp.Core
 {
     /// <summary>
     /// Remembers which tunnel was last successfully activated, for the
     /// background service to reconnect to on its next start (including at
-    /// boot, before anyone logs in). Cleared on an explicit disconnect, so
-    /// "restore last connection status" means exactly that: if you were
-    /// connected when the machine went down, it reconnects; if you'd already
-    /// disconnected, it doesn't.
+    /// boot, before anyone logs in). Cleared on an explicit disconnect.
     ///
-    /// Just a plain text file with a tunnel name — not sensitive on its own
-    /// (the actual config stays wherever ConfigStore already protects it;
-    /// this only ever names a non-portable, machine-DPAPI tunnel, since
-    /// that's the only kind the service can decrypt without a human present
-    /// to type a password).
+    /// Stored in HKEY_LOCAL_MACHINE\Software\WgSharp (LastTunnel) so:
+    ///   - It survives MSI upgrades without special installer logic.
+    ///   - The background service (LocalSystem) can read the same value the
+    ///     GUI (an elevated user process) writes — no session boundary issues.
+    ///   - No ProgramData directory creation needed.
+    ///
+    /// Only ever holds a tunnel name (never key material), so reading it from
+    /// HKLM is not a security concern — the actual config is still protected
+    /// by DPAPI in ConfigStore.
     /// </summary>
     public static class ServiceState
     {
-        private static string FilePath
-        {
-            get
-            {
-                string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-                return Path.Combine(Path.Combine(programData, "WgSharp"), "last_tunnel.txt");
-            }
-        }
+        private const string RegKey   = @"Software\WgSharp";
+        private const string ValueName = "LastTunnel";
 
         public static void SetLastTunnel(string name)
         {
             try
             {
-                string dir = Path.GetDirectoryName(FilePath);
-                if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
-                File.WriteAllText(FilePath, name ?? "");
+                using (var k = Registry.LocalMachine.CreateSubKey(RegKey))
+                    if (k != null) k.SetValue(ValueName, name ?? "", RegistryValueKind.String);
             }
             catch { }
         }
 
         public static void Clear()
         {
-            try { if (File.Exists(FilePath)) File.Delete(FilePath); }
+            try
+            {
+                using (var k = Registry.LocalMachine.OpenSubKey(RegKey, true))
+                    if (k != null) k.DeleteValue(ValueName, false);
+            }
             catch { }
         }
 
@@ -50,9 +48,14 @@ namespace WgSharp.Core
         {
             try
             {
-                if (!File.Exists(FilePath)) return null;
-                string s = File.ReadAllText(FilePath).Trim();
-                return s.Length == 0 ? null : s;
+                using (var k = Registry.LocalMachine.OpenSubKey(RegKey, false))
+                {
+                    if (k == null) return null;
+                    object v = k.GetValue(ValueName);
+                    if (v == null) return null;
+                    string s = v.ToString().Trim();
+                    return s.Length == 0 ? null : s;
+                }
             }
             catch { return null; }
         }

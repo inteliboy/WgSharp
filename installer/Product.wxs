@@ -51,7 +51,7 @@
              Compressed="yes"
              InstallScope="perMachine"
              Platform="x64"
-             Description="WgSharp - a from-scratch WireGuard client for Windows"
+             Description="WgSharp - a from-scratch WireGuard client for Windows (x64 and ARM64)"
              Manufacturer="inteliboy" />
 
     <!-- Same-product upgrades: installing a newer dated build replaces the
@@ -82,6 +82,19 @@
     <MajorUpgrade AllowSameVersionUpgrades="yes"
                   DowngradeErrorMessage="A newer version of WgSharp is already installed." />
     <MediaTemplate EmbedCab="yes" />
+
+    <!-- Block installation on non-x64 hardware. The MSI's Platform="x64"
+         already prevents installation on 32-bit Windows (the Windows
+         Installer engine enforces that itself). This condition additionally
+         blocks ARM64 and any other architecture where WgSharp's x64 build
+         cannot reach a working kernel driver: Wintun/WireGuardNT install a
+         kernel-mode driver, and Windows' CPU emulation only covers user-mode
+         code. Msix64 is set by Windows Installer on x64 (AMD64) native
+         machines; it is NOT set on ARM64, even when running an x64 installer
+         under emulation. -->
+    <Condition Message="WgSharp requires a 64-bit x64 (amd64) processor. This machine's architecture is not supported.">
+      <![CDATA[Msix64]]>
+    </Condition>
 
     <!-- Closing a running WgSharp before files are touched needs TWO
          mechanisms, since one WgSharp.exe plays two roles:

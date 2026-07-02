@@ -77,8 +77,23 @@ namespace WgSharp.Core
             // runtime query that returns immediately. If the service isn't
             // reachable yet (still starting), report a Handshaking-ish state
             // rather than failing — the GUI's status poll will catch up.
-            string err;
-            string resp = ServiceClient.SendCommand("STATUS", out err);
+            //
+            // On ARM64 (x64 emulation), service startup is slower and the
+            // first few STATUS polls race against the pipe becoming ready.
+            // Retry a handful of times with a short sleep before giving up
+            // and logging the null — the GUI polls every ~2s anyway, so a
+            // brief retry here is invisible to the user but avoids a confusing
+            // "null" in the debug log on every normal ARM64 startup.
+            string err = null;
+            string resp = null;
+            int maxTries = _loggedFirstStatus ? 1 : 4;
+            for (int i = 0; i < maxTries; i++)
+            {
+                resp = ServiceClient.SendCommand("STATUS", out err);
+                if (resp != null) break;
+                if (i < maxTries - 1) System.Threading.Thread.Sleep(300);
+            }
+
             if (!_loggedFirstStatus)
             {
                 _loggedFirstStatus = true;

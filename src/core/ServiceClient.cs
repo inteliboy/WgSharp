@@ -12,7 +12,7 @@ namespace WgSharp.Core
     /// </summary>
     public static class ServiceClient
     {
-        private const int ConnectTimeoutMs = 800;
+        private const int ConnectTimeoutMs = 2500; // generous for ARM64/emulated startup
 
         /// <summary>
         /// Cheap liveness check: a connect attempt with a short timeout. This

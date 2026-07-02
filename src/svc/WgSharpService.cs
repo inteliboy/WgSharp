@@ -134,14 +134,60 @@ namespace WgSharp.Svc
                     try { _tunnel.Stop(); } catch (Exception ex) { LogLine("Stop (pre-switch) error: " + ex.Message); }
                     _tunnel = null;
                 }
-                if (WgSharp.Core.TunnelBackendFactory.RequiresManagedBackend(cfg) && AppSettings.UseWireGuardNt)
-                    LogLine("This tunnel uses AmneziaWG; using the managed backend for it " +
-                        "(WireGuardNT can't speak AWG) regardless of the WireGuardNT setting.");
-                ITunnelBackend tunnel = WgSharp.Core.TunnelBackendFactory.Create(cfg, AppSettings.UseWireGuardNt);
-                tunnel.LogMessage += LogLine;
-                tunnel.Start();
+
+                bool wantNt = AppSettings.UseWireGuardNt &&
+                              !WgSharp.Core.TunnelBackendFactory.RequiresManagedBackend(cfg);
+
+                if (wantNt)
+                    LogLine("WireGuardNT backend selected.");
+
+                ITunnelBackend tunnel = null;
+                if (wantNt)
+                {
+                    try
+                    {
+                        tunnel = new WireGuardNtTunnel(cfg);
+                        tunnel.LogMessage += LogLine;
+                        tunnel.Start();
+                    }
+                    catch (Exception ex)
+                    {
+                        LogLine("WireGuardNT failed (" + ex.Message + "); falling back to managed backend.");
+                        // Write to a file too, so this is visible even if the pipe
+                        // isn't reachable yet (e.g. early startup crash on ARM64).
+                        WriteEmergencyLog("WireGuardNT fallback: " + ex.Message);
+                        if (tunnel != null) { try { tunnel.Stop(); } catch { } }
+                        tunnel = null;
+                        wantNt = false;
+                    }
+                }
+
+                if (tunnel == null)
+                {
+                    if (!wantNt)
+                        LogLine("Using managed backend.");
+                    tunnel = new Tunnel(cfg);
+                    tunnel.LogMessage += LogLine;
+                    tunnel.Start();
+                }
+
                 _tunnel = tunnel;
             }
+        }
+
+        private static void WriteEmergencyLog(string message)
+        {
+            try
+            {
+                string dir = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                    "WgSharp");
+                System.IO.Directory.CreateDirectory(dir);
+                string path = System.IO.Path.Combine(dir, "service-error.log");
+                System.IO.File.AppendAllText(path,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + " " + message + "\r\n");
+            }
+            catch { }
         }
 
         private void StopTunnelInternal()

@@ -91,7 +91,9 @@ namespace WgSharp.Ui
             _settingsPanel = new SettingsPanel();
             _settingsPanel.LoadFromSettings();
             _settingsPanel.PortableModeChanged += OnPortableModeChanged;
+            _settingsPanel.ExperimentalFeaturesChanged += ApplyExperimentalFeatures;
             tabSettings.Controls.Add(_settingsPanel);
+            ApplyExperimentalFeatures(); // set initial visibility
 
             // Load any previously stored tunnels (DPAPI or portable).
             bool loaded = false;
@@ -216,7 +218,57 @@ namespace WgSharp.Ui
             {
                 OnTrayMenuOpening(this, null);   // pre-warm the tray menu path
                 CheckForRunningServiceTunnel();  // detect a service tunnel + start the log pump
+                MaybeAutoReconnect();            // reconnect if upgraded/restarted while connected
             }));
+        }
+
+        // After an MSI upgrade (or any restart while a tunnel was active),
+        // ServiceState still holds the last tunnel name — the MSI doesn't touch
+        // ProgramData. If the service is installed but not running a tunnel yet,
+        // and we have a last-tunnel record, activate it automatically so the
+        // user doesn't have to reconnect manually after every upgrade.
+        // Only fires once per launch (guarded by _startupWorkDone parent), only
+        // when nothing is already active (_active/_busy guards), and only when
+        // the service is available (non-portable, service-managed path).
+        private void MaybeAutoReconnect()
+        {
+            if (AppSettings.PortableMode) return;
+            if (_active || _busy) return;
+
+            string lastName = ServiceState.GetLastTunnel();
+            if (string.IsNullOrEmpty(lastName)) return;
+
+            // Make sure the tunnel still exists in the config store.
+            if (!ConfigStore.Exists(lastName)) return;
+
+            // If the service is installed and running: CheckForRunningServiceTunnel
+            // will have already picked it up (or it's still starting). Don't race it.
+            if (ServiceInstaller.IsInstalled() && ServiceInstaller.IsRunning()) return;
+
+            // No active tunnel, but we have a last-tunnel record. Auto-activate.
+            Log("Auto-reconnecting to '" + lastName + "' (was active before last restart).");
+
+            // Select it in the list first so the activation picks the right one.
+            int idx = lstTunnels.Items.IndexOf(lastName);
+            if (idx < 0)
+            {
+                // Not in the list yet — may be a fresh launch with no selection.
+                lstTunnels.Items.Add(lastName);
+                idx = lstTunnels.Items.IndexOf(lastName);
+            }
+            if (idx >= 0) lstTunnels.SelectedIndex = idx;
+            _tunnelName = lastName;
+
+            // Small delay so the UI has settled before activation starts.
+            var t = new System.Windows.Forms.Timer();
+            t.Interval = 500;
+            t.Tick += delegate
+            {
+                t.Stop();
+                t.Dispose();
+                if (!_active && !_busy) BeginActivate();
+            };
+            t.Start();
         }
 
         private void ApplyToolbarIcons()
@@ -1387,6 +1439,15 @@ namespace WgSharp.Ui
             AppSettings.Save();
         }
 
+        private void ApplyExperimentalFeatures()
+        {
+            // "Scan from QR code" in the Add menu is experimental (webcam
+            // scanning is functional but not reliable on all hardware/drivers).
+            // The menu is rebuilt on every click so nothing to show/hide here;
+            // the gate is in OnAddTunnelClicked based on AppSettings.ExperimentalFeatures.
+            // "Show QR" on a tunnel (btnQr) is always visible — stable feature.
+        }
+
         private void OnPortableModeChanged()
         {
             // The store location changed; reload the tunnel list from the new store.
@@ -1432,12 +1493,15 @@ namespace WgSharp.Ui
             var menu = new ContextMenuStrip();
             var importItem = new ToolStripMenuItem("Import tunnel(s) from file\u2026");
             importItem.Click += new EventHandler(OnLoadClicked);
-            var scanItem = new ToolStripMenuItem("Scan from QR code");
-            scanItem.Click += new EventHandler(OnScanQrClicked);
+            menu.Items.Add(importItem);
+            if (AppSettings.ExperimentalFeatures)
+            {
+                var scanItem = new ToolStripMenuItem("Scan from QR code \u2014 experimental");
+                scanItem.Click += new EventHandler(OnScanQrClicked);
+                menu.Items.Add(scanItem);
+            }
             var emptyItem = new ToolStripMenuItem("Add empty tunnel\u2026");
             emptyItem.Click += new EventHandler(OnAddEmptyTunnel);
-            menu.Items.Add(importItem);
-            menu.Items.Add(scanItem);
             menu.Items.Add(emptyItem);
             // drop the menu just below the button
             menu.Show(btnAddTunnel, new Point(0, btnAddTunnel.Height));

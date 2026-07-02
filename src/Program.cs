@@ -10,27 +10,20 @@ namespace WgSharp
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool IsWow64Process2(IntPtr hProcess, out ushort processMachine, out ushort nativeMachine);
 
-        private const ushort IMAGE_FILE_MACHINE_I386 = 0x014c;
+        private const ushort IMAGE_FILE_MACHINE_I386  = 0x014c;
         private const ushort IMAGE_FILE_MACHINE_AMD64 = 0x8664;
 
         /// <summary>
-        /// WgSharp now ships an amd64 (x64) build ONLY (see build.cmd), and
-        /// runs only on x64 hardware. Anything else is refused up front:
-        ///   - Non-x86-family hardware (e.g. ARM64 Windows via its x64/x86
-        ///     emulation layer) is genuine instruction-set translation, which
-        ///     only covers user-mode code. Wintun/WireGuardNT both install a
-        ///     kernel-mode driver, and kernel-mode code is never emulated, so
-        ///     there's no path to a working driver there at all.
-        ///   - 32-bit x86 hardware is no longer a supported target now that we
-        ///     build x64 only; we'd never actually run there (an x64 PE won't
-        ///     load on 32-bit Windows), but we still report it clearly if some
-        ///     future loader ever tried.
-        /// Rather than fail confusingly deep inside adapter creation later,
-        /// detect a mismatch up front and refuse to start with a clear
-        /// explanation. IsWow64Process2's pNativeMachine always reports the
-        /// TRUE underlying hardware architecture, independent of how the
-        /// current process itself is classified, so checking it directly is
-        /// the right test: we require the native machine to be AMD64.
+        /// WgSharp ships an amd64 (x64) build only and runs on x64 hardware
+        /// only. Anything else is refused up front: Wintun and WireGuardNT
+        /// both install a kernel-mode driver, and Windows' CPU emulation only
+        /// covers user-mode code — so an x64 build running under emulation on
+        /// ARM64 or any other architecture will never reach a working driver.
+        /// Rather than fail confusingly deep inside adapter creation, detect
+        /// the mismatch here and exit with a clear message.
+        /// IsWow64Process2's pNativeMachine always reports the TRUE underlying
+        /// hardware architecture regardless of how the current process is
+        /// classified, making it the right probe here.
         /// </summary>
         private static bool IsArchitectureMismatch()
         {
@@ -40,14 +33,12 @@ namespace WgSharp
                 if (!IsWow64Process2(System.Diagnostics.Process.GetCurrentProcess().Handle,
                         out processMachine, out nativeMachine))
                 {
-                    // API unavailable (pre-Windows 10 1709). Fall back to the
-                    // process bitness: an x64 build only ever runs as a 64-bit
-                    // process on x64 Windows, so a 32-bit process here means we
-                    // somehow landed somewhere unsupported. Don't hard-block on
-                    // uncertainty though — only block the clearly-wrong case.
-                    return !Environment.Is64BitProcess && !Environment.Is64BitOperatingSystem;
+                    // API unavailable (pre-Windows 10 1709). Fall back to
+                    // process bitness: our x64 build only runs as a 64-bit
+                    // process on x64 Windows, so a 32-bit process here means
+                    // we're on unsupported hardware.
+                    return !Environment.Is64BitProcess || !Environment.Is64BitOperatingSystem;
                 }
-                // amd64 only.
                 return nativeMachine != IMAGE_FILE_MACHINE_AMD64;
             }
             catch { return false; } // never block due to our own detection failing
@@ -83,12 +74,12 @@ namespace WgSharp
             if (IsArchitectureMismatch())
             {
                 MessageBox.Show(
-                    "WgSharp is built for 64-bit x64 (amd64) only and can't run on " +
-                    "this machine's architecture.\n\n" +
-                    "This isn't a missing download or a setting to change: Wintun/WireGuardNT " +
-                    "install a kernel-mode driver, and Windows' CPU emulation only covers " +
-                    "user-mode code, so an x64 build can never reach a working driver on " +
-                    "non-x64 hardware regardless of how it's run.",
+                    "WgSharp is built for 64-bit x64 (amd64) Windows only and cannot run " +
+                    "on this machine's architecture.\n\n" +
+                    "Wintun and WireGuardNT install a kernel-mode driver, and Windows' CPU " +
+                    "emulation only covers user-mode code — so an x64 build running under " +
+                    "emulation (e.g. on ARM64) will never reach a working driver regardless " +
+                    "of how it's launched.",
                     "WgSharp \u2014 unsupported architecture",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
@@ -134,6 +125,8 @@ namespace WgSharp
                 // MainForm is constructed (so the GUI-at-login choice it just
                 // made is already in effect for this very launch).
                 WgSharp.Core.InstallLocation.ApplyFirstRunDefaultsIfApplicable();
+                // Silently re-registers the service if an MSI upgrade removed it.
+                WgSharp.Core.InstallLocation.RestoreServiceIfUpgradeWipedIt();
                 // Unlike the above, this one applies on every launch, not
                 // just the first — see its doc comment.
                 WgSharp.Core.InstallLocation.EnforcePortableModeRestriction();

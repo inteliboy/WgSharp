@@ -2,84 +2,216 @@ using System;
 using System.IO;
 using System.Reflection;
 using System.Text;
+using Microsoft.Win32;
 
 namespace WgSharp.Core
 {
     /// <summary>
-    /// Lightweight persisted settings, as a tiny key=value text file.
-    /// Location depends on how WgSharp is running (see InstallLocation):
-    /// next to the executable normally (so portable mode is genuinely
-    /// self-contained — settings travel with the app folder), or under
-    /// ProgramData when running from the MSI's fixed install location,
-    /// matching where ConfigStore already keeps non-portable tunnel configs.
+    /// Persisted settings. Storage location depends on run mode:
+    ///
+    ///   Non-portable (installed or zip without PortableMode):
+    ///     HKEY_LOCAL_MACHINE\Software\WgSharp
+    ///     Written/read with the process's existing elevation (LocalMachine
+    ///     requires admin, which WgSharp's manifest already demands).
+    ///     Machine-scoped so the background service (LocalSystem) can read
+    ///     the same values the GUI writes — no per-user divergence.
+    ///
+    ///   Portable mode:
+    ///     A plain key=value text file next to the executable, so the whole
+    ///     app folder is self-contained and travels without touching the
+    ///     registry on the host machine.
+    ///
+    /// PortableMode itself is always checked in the file first (it's what
+    /// tells us which store to use for everything else). If the file says
+    /// PortableMode=true, the file IS the store. Otherwise we use the
+    /// registry, and the file (if it exists) is ignored for all other keys.
     /// </summary>
     public static class AppSettings
     {
         public static bool PortableMode;
-        public static bool UseWireGuardNt = true;    // use kernel WireGuardNT backend (default)
-        public static bool DebugLog;                 // verbose Log tab output + service log file
-        public static bool StartGuiAtLogin;          // launch the GUI (to tray) on user login
-        // User's custom drag-to-reorder ordering for the tunnel list, as the
-        // exact display order, pipe-separated. ConfigStore.List() itself
-        // always returns names alphabetically (that's its job: list what's on
-        // disk); this is purely a display-order override layered on top by
-        // MainForm. Tunnels not mentioned here (new imports, or this being
-        // empty/first-run) fall back to alphabetical, appended after any
-        // explicitly-ordered ones — see MainForm.ApplyTunnelOrder.
+        public static bool UseWireGuardNt = true;
+        public static bool DebugLog;
+        public static bool ExperimentalFeatures;
+        public static bool StartGuiAtLogin;
+        public static bool ServiceWasInstalled;
         public static string TunnelOrder = "";
 
-        private static string ExeDir
-        {
-            get
-            {
-                string path = Assembly.GetExecutingAssembly().Location;
-                return Path.GetDirectoryName(path);
-            }
-        }
+        private const string RegKey = @"Software\WgSharp";
 
-        private static string SettingsPath
+        // ------------------------------------------------------------------ //
+        //  Store selection                                                     //
+        // ------------------------------------------------------------------ //
+
+        private static bool UseRegistry { get { return !PortableMode; } }
+
+        private static string FileSettingsPath
         {
             get
             {
-                // Installed (Program Files, fixed location): use ProgramData,
-                // like ConfigStore already does for non-portable tunnel
-                // configs — Program Files isn't really meant to be written to
-                // on an ongoing basis, even though our manifest forces
-                // elevation. Any other context (the zip distribution, a dev
-                // build, portable mode's own folder) keeps using the exe's own
-                // directory, so settings still travel with the app folder.
-                string dir;
-                if (InstallLocation.IsInstalled())
-                {
-                    string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
-                    dir = Path.Combine(programData, "WgSharp");
-                    try { Directory.CreateDirectory(dir); } catch { }
-                }
-                else
-                {
-                    dir = ExeDir;
-                }
-                return Path.Combine(dir, "WgSharp.settings");
+                string exe = Assembly.GetExecutingAssembly().Location;
+                return Path.Combine(Path.GetDirectoryName(exe), "WgSharp.settings");
             }
         }
 
         /// <summary>
-        /// True if a settings file already exists on disk. Checked BEFORE
-        /// calling Load() to distinguish a genuine first run (no settings
-        /// file yet) from a normal launch — used by MainForm to decide
-        /// whether to apply InstallLocation's first-run defaults.
+        /// True if settings have been saved before (used to detect first run).
+        /// For registry mode: key exists. For file mode: file exists.
         /// </summary>
         public static bool SettingsFileExists
         {
-            get { try { return File.Exists(SettingsPath); } catch { return true; } } // assume "existing" on error, the safer default (skip first-run actions)
+            get
+            {
+                try
+                {
+                    // Always check file first so we know whether PortableMode is set.
+                    if (File.Exists(FileSettingsPath)) return true;
+                    // If no file, check registry.
+                    using (var k = Registry.LocalMachine.OpenSubKey(RegKey, false))
+                        return k != null;
+                }
+                catch { return true; } // assume existing on error (skip first-run defaults)
+            }
         }
+
+        // ------------------------------------------------------------------ //
+        //  Load                                                                //
+        // ------------------------------------------------------------------ //
 
         public static void Load()
         {
+            // Step 1: always read the file to learn whether PortableMode is on.
+            LoadPortableFlagFromFile();
+
+            if (UseRegistry)
+                LoadFromRegistry();
+            else
+                LoadFromFile(); // portable: file is the only store
+        }
+
+        private static void LoadPortableFlagFromFile()
+        {
             try
             {
-                if (!File.Exists(SettingsPath)) return;
-                foreach (string raw in File.ReadAllLines(SettingsPath))
+                if (!File.Exists(FileSettingsPath)) return;
+                foreach (string raw in File.ReadAllLines(FileSettingsPath))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#")) continue;
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0) continue;
+                    if (line.Substring(0, eq).Trim().Equals("PortableMode", StringComparison.OrdinalIgnoreCase))
+                    {
+                        PortableMode = ParseBool(line.Substring(eq + 1).Trim());
+                        return;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static void LoadFromRegistry()
+        {
+            // One-time migration: if the old text-file settings exist but the
+            // registry key doesn't yet, copy everything across and delete the
+            // file. This runs exactly once for existing users upgrading from a
+            // file-based build; afterward the file is gone and only the
+            // registry is used. Safe to run on every startup — if the registry
+            // key already exists, MigrateFileToRegistry is a no-op.
+            MigrateFileToRegistry();
+
+            try
+            {
+                using (var k = Registry.LocalMachine.OpenSubKey(RegKey, false))
+                {
+                    if (k == null) return;
+                    UseWireGuardNt      = ReadBool(k, "UseWireGuardNt", true);
+                    DebugLog            = ReadBool(k, "DebugLog", false);
+                    ExperimentalFeatures= ReadBool(k, "ExperimentalFeatures", false);
+                    StartGuiAtLogin     = ReadBool(k, "StartGuiAtLogin", false);
+                    ServiceWasInstalled = ReadBool(k, "ServiceWasInstalled", false);
+                    TunnelOrder         = ReadString(k, "TunnelOrder", "");
+                }
+            }
+            catch { }
+        }
+
+        private static void MigrateFileToRegistry()
+        {
+            try
+            {
+                // Already migrated (registry key exists) — nothing to do.
+                using (var existing = Registry.LocalMachine.OpenSubKey(RegKey, false))
+                    if (existing != null) return;
+
+                // Old file locations: ProgramData\WgSharp\WgSharp.settings (installed)
+                // or beside the exe (zip). Check both.
+                string programData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+                string[] candidates = {
+                    Path.Combine(programData, "WgSharp", "WgSharp.settings"),
+                    FileSettingsPath,
+                };
+
+                string found = null;
+                foreach (string c in candidates)
+                    if (File.Exists(c)) { found = c; break; }
+                if (found == null) return;
+
+                // Parse the file temporarily into local vars, then write registry.
+                bool wgNt = true, debug = false, exp = false, gui = false, svc = false;
+                string order = "";
+                foreach (string raw in File.ReadAllLines(found))
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("#")) continue;
+                    int eq = line.IndexOf('=');
+                    if (eq <= 0) continue;
+                    string key = line.Substring(0, eq).Trim();
+                    string val = line.Substring(eq + 1).Trim();
+                    if (key.Equals("UseWireGuardNt", StringComparison.OrdinalIgnoreCase))       wgNt  = ParseBool(val);
+                    else if (key.Equals("DebugLog", StringComparison.OrdinalIgnoreCase))         debug = ParseBool(val);
+                    else if (key.Equals("ExperimentalFeatures", StringComparison.OrdinalIgnoreCase)) exp = ParseBool(val);
+                    else if (key.Equals("StartGuiAtLogin", StringComparison.OrdinalIgnoreCase))  gui   = ParseBool(val);
+                    else if (key.Equals("ServiceWasInstalled", StringComparison.OrdinalIgnoreCase)) svc = ParseBool(val);
+                    else if (key.Equals("TunnelOrder", StringComparison.OrdinalIgnoreCase))      order = val;
+                    // PortableMode=true in this file means we're in portable mode
+                    // and shouldn't be here — but we already checked UseRegistry
+                    // before calling LoadFromRegistry(), so it's safe to ignore it.
+                }
+
+                using (var k = Registry.LocalMachine.CreateSubKey(RegKey))
+                {
+                    if (k == null) return;
+                    k.SetValue("UseWireGuardNt",       wgNt  ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("DebugLog",             debug ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("ExperimentalFeatures", exp   ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("StartGuiAtLogin",      gui   ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("ServiceWasInstalled",  svc   ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("TunnelOrder",          order,          RegistryValueKind.String);
+                }
+
+                // Also migrate last_tunnel.txt → registry if present.
+                string lastTunnelFile = Path.Combine(programData, "WgSharp", "last_tunnel.txt");
+                if (File.Exists(lastTunnelFile))
+                {
+                    string lt = File.ReadAllText(lastTunnelFile).Trim();
+                    if (lt.Length > 0) ServiceState.SetLastTunnel(lt);
+                    try { File.Delete(lastTunnelFile); } catch { }
+                }
+
+                // Delete the settings file now that everything is in the registry.
+                // Best-effort: if it fails (permissions, locked), it's harmless —
+                // the registry already has the values and takes precedence.
+                try { File.Delete(found); } catch { }
+            }
+            catch { /* migration is best-effort; never block startup */ }
+        }
+
+        private static void LoadFromFile()
+        {
+            try
+            {
+                if (!File.Exists(FileSettingsPath)) return;
+                foreach (string raw in File.ReadAllLines(FileSettingsPath))
                 {
                     string line = raw.Trim();
                     if (line.Length == 0 || line.StartsWith("#")) continue;
@@ -93,29 +225,87 @@ namespace WgSharp.Core
                         UseWireGuardNt = ParseBool(val);
                     else if (key.Equals("DebugLog", StringComparison.OrdinalIgnoreCase))
                         DebugLog = ParseBool(val);
+                    else if (key.Equals("ExperimentalFeatures", StringComparison.OrdinalIgnoreCase))
+                        ExperimentalFeatures = ParseBool(val);
                     else if (key.Equals("StartGuiAtLogin", StringComparison.OrdinalIgnoreCase))
                         StartGuiAtLogin = ParseBool(val);
+                    else if (key.Equals("ServiceWasInstalled", StringComparison.OrdinalIgnoreCase))
+                        ServiceWasInstalled = ParseBool(val);
                     else if (key.Equals("TunnelOrder", StringComparison.OrdinalIgnoreCase))
                         TunnelOrder = val;
                 }
             }
-            catch { /* defaults on any error */ }
+            catch { }
         }
 
+        // ------------------------------------------------------------------ //
+        //  Save                                                                //
+        // ------------------------------------------------------------------ //
+
         public static void Save()
+        {
+            if (UseRegistry)
+                SaveToRegistry();
+            else
+                SaveToFile();
+        }
+
+        private static void SaveToRegistry()
+        {
+            try
+            {
+                using (var k = Registry.LocalMachine.CreateSubKey(RegKey))
+                {
+                    if (k == null) return;
+                    k.SetValue("UseWireGuardNt",       UseWireGuardNt       ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("DebugLog",             DebugLog             ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("ExperimentalFeatures", ExperimentalFeatures ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("StartGuiAtLogin",      StartGuiAtLogin      ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("ServiceWasInstalled",  ServiceWasInstalled  ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("TunnelOrder",          TunnelOrder ?? "",            RegistryValueKind.String);
+                    // PortableMode is NOT stored in the registry — if it's false
+                    // (the normal case) we use the registry; if it's true we use
+                    // the file. Storing false here would be redundant, and we never
+                    // reach SaveToRegistry() when PortableMode is true anyway.
+                }
+            }
+            catch { }
+        }
+
+        private static void SaveToFile()
         {
             try
             {
                 var sb = new StringBuilder();
-                sb.AppendLine("# WgSharp settings");
+                sb.AppendLine("# WgSharp settings (portable mode)");
                 sb.AppendLine("PortableMode=" + (PortableMode ? "true" : "false"));
                 sb.AppendLine("UseWireGuardNt=" + (UseWireGuardNt ? "true" : "false"));
                 sb.AppendLine("DebugLog=" + (DebugLog ? "true" : "false"));
+                sb.AppendLine("ExperimentalFeatures=" + (ExperimentalFeatures ? "true" : "false"));
                 sb.AppendLine("StartGuiAtLogin=" + (StartGuiAtLogin ? "true" : "false"));
+                sb.AppendLine("ServiceWasInstalled=" + (ServiceWasInstalled ? "true" : "false"));
                 sb.AppendLine("TunnelOrder=" + (TunnelOrder ?? ""));
-                File.WriteAllText(SettingsPath, sb.ToString());
+                File.WriteAllText(FileSettingsPath, sb.ToString());
             }
-            catch { /* best-effort */ }
+            catch { }
+        }
+
+        // ------------------------------------------------------------------ //
+        //  Helpers                                                             //
+        // ------------------------------------------------------------------ //
+
+        private static bool ReadBool(RegistryKey k, string name, bool defaultVal)
+        {
+            object v = k.GetValue(name);
+            if (v == null) return defaultVal;
+            if (v is int) return (int)v != 0;
+            return ParseBool(v.ToString());
+        }
+
+        private static string ReadString(RegistryKey k, string name, string defaultVal)
+        {
+            object v = k.GetValue(name);
+            return v != null ? v.ToString() : defaultVal;
         }
 
         private static bool ParseBool(string v)

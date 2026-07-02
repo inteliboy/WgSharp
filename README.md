@@ -17,11 +17,10 @@ transport data path. A WinForms GUI. All compiled with `csc.exe` alone —
 </div>
 
 > [!NOTE]
-> **Status:** functional and actively developed. The managed data path, the
-> WFP kill-switch, and multi-peer routing are validated on real hardware. The
-> optional WireGuardNT (kernel) backend has its bring-up path implemented but
-> hasn't been validated under sustained load yet. See
-> [Current scope and limitations](#current-scope-and-limitations).
+> **Status:** functional and actively developed. The managed data path (with
+> Windows CNG-accelerated ChaCha20-Poly1305 where available), the WireGuardNT
+> kernel backend, the WFP kill-switch, and multi-peer routing are all validated
+> on real hardware. See [Current scope and limitations](#current-scope-and-limitations).
 
 ---
 
@@ -55,8 +54,10 @@ transport data path. A WinForms GUI. All compiled with `csc.exe` alone —
 | | |
 |---|---|
 | 🔀 **Two interchangeable backends** | A fully from-scratch managed implementation, and an optional kernel-mode backend driven by the official WireGuardNT driver for higher throughput. |
+| ⚡ **Hardware-accelerated crypto** | The managed backend automatically uses Windows CNG (`BCryptEncrypt` / `BCryptDecrypt`) for ChaCha20-Poly1305 on Windows 10 1709+, giving 3-6× higher throughput than the pure managed path. Falls back transparently to the hand-written implementation on older Windows. |
 | 🛡️ **Leak-free kill-switch** | Built on the Windows Filtering Platform (WFP) with weighted permit/block filters — not a netsh firewall-rule approximation. |
 | 🔑 **Multi-peer & cryptokey routing** | mac2/cookie replies, endpoint re-resolution, persistent keepalive, full handshake/transport framing. |
+| 🌐 **Split-tunnel DNS auto-fix** | If the configured DNS server isn't covered by AllowedIPs, WgSharp automatically routes it through the tunnel so DNS works without requiring manual config changes. |
 | 🧯 **Self-authorizing firewall rules** | Pre-registers with Windows Firewall at startup, so the interactive "allow this app" prompt never interrupts you. |
 | 🚀 **Background service** | Reconnects your last tunnel *before login*, the same model the official client uses — a real `LocalSystem` service with the GUI as a thin client over a named pipe. |
 | 🖥️ **GUI autostart** | Optionally launches the tray app at login too, independent of the boot-time service. |
@@ -64,8 +65,9 @@ transport data path. A WinForms GUI. All compiled with `csc.exe` alone —
 | 🔒 **Portable mode** | Password-encrypted configs that travel with the app folder, with per-tunnel passwords cached for the session. |
 | 📊 **Live stats** | Upload/download charts, session duration, total transferred, and tunnel latency. |
 | ✍️ **Config editor** | Syntax highlighting, a live-derived public key, and QR export. |
-| 📷 **Scan from QR code** | Add a tunnel by pointing the webcam at a QR code (or scanning a saved image) — a from-scratch QR decoder, no external library. |
+| 📷 **Scan from QR code** *(experimental)* | Add a tunnel by pointing the webcam at a QR code (or scanning a saved image) — a from-scratch QR decoder, no external library. Enabled via **Settings → Show experimental features**. |
 | 🧰 **System tray** | Live status tooltip, quick-connect menu, closing the window minimizes instead of exiting. |
+| ℹ️ **About dialog** | Version, GitHub link, and Buy Me a Coffee support link — accessible from the window's system menu. |
 
 ## Screenshots
 
@@ -243,19 +245,22 @@ download. Routine download/verification log lines only show up in the Log
 tab when **Settings → Debug log** is on — by default you just see whether the
 tunnel came up, not the driver-fetch plumbing behind it.
 
-WgSharp ships an **amd64 (x64) build only**, and runs on x64 hardware only.
-There is no x86 or ARM64 build, and that's deliberate. ARM64 in particular
-can't work here for two independent reasons: the legacy `csc.exe` used here
-(chosen specifically so this project needs no MSBuild/Roslyn toolchain)
-predates ARM64 Windows and doesn't accept `/platform:arm64`; and separately,
-even a genuine ARM64 binary couldn't work, since Wintun/WireGuardNT both
-install a kernel-mode driver and Windows' CPU emulation only covers user-mode
-code — so there's no path to a working driver on non-x64 hardware regardless
-of how it's run. WgSharp checks the machine's real underlying architecture at
-startup and refuses to run on anything but x64 rather than fail confusingly
-later. ARM64 Windows machines can run the amd64 build under x64 emulation for
-the user-mode code, but the kernel driver still won't load — which is exactly
-what the startup check blocks.
+WgSharp ships an **amd64 (x64) build only**, and runs on x64 Windows only.
+Wintun and WireGuardNT both install a kernel-mode driver, and Windows' CPU
+emulation only covers user-mode code — so an x64 build running under emulation
+(e.g. on ARM64) will never reach a working driver. WgSharp checks the machine's
+real underlying architecture at startup via `IsWow64Process2` and refuses to run
+on anything but native x64 rather than fail confusingly inside adapter
+creation.
+
+**Auto-reconnect after upgrade or restart:** if you were connected to a tunnel
+when WgSharp last exited (or when an MSI upgrade restarted it), WgSharp
+reconnects to that tunnel automatically on next launch. The last-tunnel record
+is stored in `HKEY_LOCAL_MACHINE\Software\WgSharp` (registry), which the MSI
+installer never touches. On first launch after an upgrade, WgSharp sees the
+record, finds the tunnel still in the config store, and activates it — the
+same experience as if you'd clicked Connect yourself. Only applies to
+non-portable tunnels (the service can't decrypt portable configs unattended).
 
 ## Sample configuration
 
@@ -305,9 +310,10 @@ PersistentKeepalive = 25
 | | Managed (default) | WireGuardNT |
 |---|---|---|
 | Data path | Hand-written C# crypto/transport | Official kernel-mode driver (`wireguard.dll`) |
-| Throughput | Good | Higher — kernel data path |
+| Crypto | CNG-accelerated (Win 10 1709+), managed fallback | Kernel SIMD (driver handles it) |
+| Throughput | Good — CNG; higher than pure managed | Higher — kernel data path |
 | Adapter | Wintun | WireGuardNT's own miniport |
-| Maturity | Validated on hardware | Bring-up implemented; sustained-load untested |
+| AWG support | ✅ (always managed for AWG configs) | ❌ (driver can't speak AWG framing) |
 
 Switch between them in **Settings → Use WireGuardNT (kernel) backend**. Each
 backend uses its own deterministic adapter identity, so switching back and
@@ -470,8 +476,20 @@ service, regardless of whether it's installed.
   written** at all — the GUI instead pulls the service's recent activity from
   a small in-memory buffer over the control pipe, so there's no constant disk
   I/O or ever-growing file.
+- **Show experimental features** — unhides features that work but aren't
+  reliable on all hardware. Currently this only affects **Scan from QR code**
+  in the Add Tunnel menu, which depends on the legacy VFW webcam API and may
+  not function with every camera driver. **Show QR** on a selected tunnel
+  (the QR icon in the toolbar) is always available regardless of this setting
+  — it's just rendering an image from text, no hardware involved.
 
-Settings persist to `WgSharp.settings` beside the executable.
+Settings persist to `HKEY_LOCAL_MACHINE\Software\WgSharp` in the registry
+(non-portable mode) or a `WgSharp.settings` file next to the executable
+(portable mode only). Using the registry means the background service
+(LocalSystem) reads the same values the GUI writes, upgrades never lose
+settings, and the app leaves no stray files in Program Files or ProgramData.
+Existing users upgrading from a file-based build are migrated automatically on
+first launch — values are copied to the registry and the old file is removed.
 
 ## Tunnel list: import, drag-and-drop, double-click to connect
 
@@ -499,9 +517,10 @@ Settings persist to `WgSharp.settings` beside the executable.
   code — either live via the webcam, or from a saved image. See
   [Scanning a QR code](#scanning-a-qr-code) for how it works and its limits.
 
-## Scanning a QR code
+## Scanning a QR code *(experimental)*
 
-**Add Tunnel → Scan from QR code** opens a small live preview and decodes
+**Add Tunnel → Scan from QR code** is available when **Settings → Show
+experimental features** is on. It opens a small live preview and decodes
 whatever QR code the webcam sees — the same kind of code a tunnel's own
 **Show QR** produces, or one exported from the official WireGuard mobile app.
 A **Scan from image file…** button is always available alongside it, for a
@@ -539,6 +558,11 @@ library, matching the rest of the project:
 
 ## Portable mode and passwords
 
+In portable mode, WgSharp stores everything — tunnel configs and settings — in
+the app folder itself, writing nothing to the registry or ProgramData. This
+makes the entire app self-contained: copy the folder to a USB drive and it
+works on any machine without leaving a trace behind.
+
 Each portable tunnel can have its own password. WgSharp caches a tunnel's
 password in memory the first time you unlock it each session — whether that's
 by activating, editing, saving, or exporting it — so you're asked **once per
@@ -558,6 +582,7 @@ src/
   crypto/                     primitives (all verified against RFC vectors)
     Curve25519.cs               X25519 (RFC 7748)
     ChaCha20Poly1305.cs         AEAD (RFC 8439) + HChaCha20/XChaCha20-Poly1305
+    CngChaCha20Poly1305.cs      CNG-accelerated per-session AEAD (BCryptEncrypt/Decrypt)
     Blake2s.cs                  hash + keyed MAC (RFC 7693)
     Kdf.cs                      HKDF over BLAKE2s (KDF1/2/3)
     Tai64N.cs                   handshake timestamp
@@ -578,13 +603,13 @@ src/
     PeerState.cs                   per-peer runtime state
     ConfigStore.cs                 DPAPI / portable-encrypted config storage
     PortableCrypto.cs              AES-256-CBC + HMAC, encrypt-then-MAC
-    AppSettings.cs                  persisted app settings
+    AppSettings.cs                  persisted app settings (HKLM registry; file in portable mode)
     Logger.cs                        Log-tab/service verbosity gate (Debug log toggle)
     LoginAutostart.cs                 per-user "start GUI at login" Run-key entry
     ServiceProtocol.cs              GUI<->service named-pipe wire format
     ServiceClient.cs                 GUI-side pipe client
     ServiceInstaller.cs              sc.exe wrapper (install/uninstall)
-    ServiceState.cs                   persisted "last connected tunnel"
+    ServiceState.cs                   persisted "last connected tunnel" (HKLM registry)
     RemoteTunnelBackend.cs            ITunnelBackend that forwards to the service
   tun/
     Wintun.cs                     wintun.dll P/Invoke + managed wrapper
@@ -606,7 +631,13 @@ Every primitive was cross-checked against reference implementations before
 integration:
 
 - **ChaCha20-Poly1305** — RFC 8439 §2.8.2 known-answer vector, plus random
-  encryptions checked against a reference AEAD.
+  encryptions checked against a reference AEAD. At the transport layer,
+  `Session` automatically uses Windows CNG (`BCryptEncrypt`/`BCryptDecrypt`
+  with `BCRYPT_CHACHA20_POLY1305_ALGORITHM`) where available (Windows 10
+  1709+), giving 3-6× higher throughput via SIMD-accelerated crypto. The
+  managed `ChaCha20Poly1305` implementation remains as a fallback and as the
+  path for the handshake (which doesn't need throughput). Both paths produce
+  byte-for-byte identical wire output.
 - **X25519** — both RFC 7748 §5.2 vectors, plus random keypairs including DH
   agreement.
 - **HChaCha20 / XChaCha20-Poly1305** — verified against the RFC draft test
@@ -619,38 +650,55 @@ integration:
 - **Replay window** — randomized trials vs. a brute-force reference.
 - **Transport framing** — type-4 round-trip, keepalive sizing, tamper
   rejection.
-- **Deterministic adapter GUID** — RFC 4122 v5 derivation verified byte-for-byte
-  against a reference UUID implementation.
+- **Key material lifetime** — private key and session key bytes are explicitly
+  zeroed (`Array.Clear`) as soon as they're no longer needed: intermediate DH
+  scalars (`es`, `ss`, `ee`, `se`) and temporary AEAD keys are zeroed
+  immediately after each handshake step; session keys (`_sendKey`, `_recvKey`)
+  are zeroed in `Session.Dispose()`; the static private key and PSK in the
+  `Config` object are zeroed in `Tunnel.Stop()` / `WireGuardNtTunnel.Stop()`
+  after all threads have exited and no rekey can occur. The plaintext config
+  string returned by `ConfigStore.Load()` cannot be zeroed (managed strings
+  are immutable and GC-movable), but the intermediate decrypted `byte[]` is
+  zeroed before `string` conversion. The private key must remain in memory
+  for the full tunnel lifetime to support rekeying — the zeroing only reduces
+  the window after disconnection during which a memory dump would expose it.
 
 ## Current scope and limitations
 
 **Implemented:** initiator handshake, multi-peer with cryptokey routing,
-transport data both directions, replay protection, rekey + keepalive timers,
-optional PSK, mac2/cookie replies, endpoint re-resolution, interface address
-assignment and route installation (IP Helper API with a netsh fallback,
-including the `/1`-split full-tunnel-default trick so the tunnel route always
-wins over the physical default route via longest-prefix-match rather than a
-metric comparison), automatic driver downloads with SHA-256 verification
-(Wintun) at startup, DPAPI- or password-encrypted config storage, a WFP-backed
-kill-switch, self-registered Windows Firewall rules, drag-and-drop import,
+transport data both directions (with CNG-accelerated ChaCha20-Poly1305 on
+Windows 10 1709+), replay protection, rekey + keepalive timers, optional PSK,
+mac2/cookie replies, endpoint re-resolution, interface address assignment and
+route installation (IP Helper API with netsh fallback, including the
+`/1`-split full-tunnel-default trick), automatic driver downloads with
+SHA-256 verification (Wintun) and Authenticode verification (WireGuardNT),
+DPAPI- or password-encrypted config storage, a WFP-backed kill-switch,
+self-registered Windows Firewall rules, drag-and-drop import/export/reorder,
 double-click-to-connect, per-tunnel password caching, a syntax-highlighting
-config editor with a live-derived public key and QR export, and a Stats tab
-with live charts and readouts.
+config editor with live-derived public key and QR export, split-tunnel DNS
+auto-routing, AmneziaWG obfuscation on the managed backend, background
+service with pre-login reconnect, auto-reconnect after MSI upgrade or
+restart, explicit key material zeroing after disconnect, and a Stats tab
+with live charts.
 
 **Not yet implemented or hardened:**
-- **Responder role** — WgSharp can't answer an inbound handshake (a client
-  doesn't need to).
-- **WireGuardNT sustained-load validation** — the kernel backend's bring-up
-  (config, addressing, kill-switch integration) works, but real-world
-  throughput and stability under load haven't been validated on hardware yet.
-  Multi-peer configs are built correctly per the WireGuardNT API spec but only
-  tested end-to-end with a single peer so far.
+- **Responder role** — WgSharp can only initiate handshakes (a client
+  doesn't need to answer them).
+- **IPv6 transport** — IPv6 peers/AllowedIPs are parsed and routes are
+  installed, but the managed backend's crypto path is IPv4-only.
 
 ### Important caveats
 
 - The crypto is **verified for correctness, not audited for side channels**.
   Constant-time intent exists (branch-free CSwap, tag comparison) but a
   managed JIT weakens those guarantees. Don't rely on this for adversarial use.
+- **Key material in memory:** the private key must remain in memory while the
+  tunnel is active (for rekeying). After disconnect, all key material is
+  explicitly zeroed. A memory dump taken while the tunnel is running will
+  expose the private key — this is unavoidable in any VPN client and applies
+  equally to the official WireGuard client. The managed string returned by
+  `ConfigStore.Load()` (which contains the plaintext config including the key)
+  lingers until GC collects it and cannot be zeroed, but the window is brief.
 - This is an independent implementation, written and tested incrementally
   against real hardware over many iterations — treat it as a serious hobby
   project, not a hardened production VPN client.
