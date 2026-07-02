@@ -273,7 +273,7 @@
          to exit before closing — it launches and moves on. -->
     <Property Id="WixShellExecTarget" Value="[#WgSharpExe]" />
     <CustomAction Id="LaunchApplication" BinaryKey="WixCA" DllEntry="WixShellExec"
-                  Impersonate="yes" Return="asyncNoWait" />
+                  Impersonate="yes" Return="ignore" />
     <InstallExecuteSequence>
       <Custom Action="LaunchApplication" After="InstallFinalize">
         NOT REMOVE

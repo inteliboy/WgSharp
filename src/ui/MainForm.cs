@@ -1347,20 +1347,36 @@ namespace WgSharp.Ui
                 _autoReconnectNegotiatingTicks++;
                 if (_autoReconnectNegotiatingTicks == 12) // ~12 seconds
                 {
+                    string retryName = _autoReconnectName; // capture before clearing
                     _autoReconnectName = null;
                     _autoReconnectNegotiatingTicks = 0;
                     Log("Auto-reconnect: still negotiating after 12s — retrying once to clear stale server session.");
-                    // Deactivate then re-activate after a short pause.
-                    DeactivateTunnel();
-                    var retry = new System.Windows.Forms.Timer();
-                    retry.Interval = 2000;
-                    retry.Tick += delegate
+                    // Use the onComplete callback so BeginActivate only fires
+                    // after the old tunnel has fully torn down — not on a fixed
+                    // timer that might fire while the service is still stopping.
+                    DeactivateTunnel(delegate
                     {
-                        retry.Stop();
-                        retry.Dispose();
-                        if (!_active && !_busy) BeginActivate();
-                    };
-                    retry.Start();
+                        // Brief pause so the server has time to clear its session
+                        // before we initiate a new handshake.
+                        var retry = new System.Windows.Forms.Timer();
+                        retry.Interval = 1500;
+                        retry.Tick += delegate
+                        {
+                            retry.Stop();
+                            retry.Dispose();
+                            if (!_active && !_busy)
+                            {
+                                if (string.IsNullOrEmpty(_tunnelName) && !string.IsNullOrEmpty(retryName))
+                                {
+                                    _tunnelName = retryName;
+                                    int idx = lstTunnels.Items.IndexOf(retryName);
+                                    if (idx >= 0) lstTunnels.SelectedIndex = idx;
+                                }
+                                BeginActivate();
+                            }
+                        };
+                        retry.Start();
+                    });
                 }
             }
             else if (connected && !string.IsNullOrEmpty(_autoReconnectName))
