@@ -56,18 +56,23 @@ namespace WgSharp.Core
             return best;
         }
 
-        /// <summary>Extract the destination IP from a raw IPv4/IPv6 packet, or null.</summary>
+        /// <summary>
+        /// Extract the destination IP from a raw IPv4/IPv6 packet, or null.
+        /// Reads IPv4 addresses directly as a long (network byte order) to
+        /// avoid allocating a temporary byte[] on every outbound packet.
+        /// </summary>
         public static IPAddress DestinationOf(byte[] packet, int length)
         {
             if (packet == null || length < 20) return null;
             int version = packet[0] >> 4;
             if (version == 4)
             {
-                // IPv4 destination at bytes 16..19
+                // IPv4 destination at bytes 16..19.
+                // IPAddress(long) takes host byte order — reconstruct it that way.
                 if (length < 20) return null;
-                byte[] d = new byte[4];
-                Array.Copy(packet, 16, d, 0, 4);
-                return new IPAddress(d);
+                long addr = ((long)packet[16] << 24) | ((long)packet[17] << 16)
+                          | ((long)packet[18] <<  8) |  (long)packet[19];
+                return new IPAddress(addr);
             }
             if (version == 6)
             {

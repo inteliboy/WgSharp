@@ -164,11 +164,18 @@ namespace WgSharp.Crypto
         private bool _disposed;
         private readonly object _lock = new object();
 
-        /// <summary>
-        /// Load a 32-byte ChaCha20 key into CNG. Throws if CNG is unavailable
-        /// or the key material is invalid — callers should check IsAvailable
-        /// first and catch exceptions for fallback.
-        /// </summary>
+        // Pre-pinned buffers: allocating a GCHandle per encrypt/decrypt call is
+        // measurable overhead at high packet rates. We pin these once at
+        // construction and reuse them for the lifetime of the session.
+        private readonly byte[] _nonceBuffer = new byte[NonceSize];  // scratch for nonce
+        private readonly byte[] _tagBuffer   = new byte[TagSize];    // scratch for auth tag
+        private readonly GCHandle _noncePin;
+        private readonly GCHandle _tagPin;
+
+        // Reusable output buffer for Encrypt to avoid new byte[] per packet.
+        // Resized up (never down) as needed; capacity tracked separately.
+        private byte[] _encryptBuf = new byte[1500 + TagSize]; // pre-sized for MTU
+
         public CngChaCha20Poly1305(byte[] key32)
         {
             if (!_available) throw new NotSupportedException("CNG ChaCha20-Poly1305 is not available on this OS.");
@@ -180,6 +187,11 @@ namespace WgSharp.Crypto
             if (status != 0 || keyHandle == IntPtr.Zero)
                 throw new Exception("BCryptGenerateSymmetricKey failed: 0x" + status.ToString("X8"));
             _key = keyHandle;
+
+            // Pin nonce and tag buffers once — they're used by every encrypt/decrypt
+            // call through BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO.pbNonce/.pbTag.
+            _noncePin = GCHandle.Alloc(_nonceBuffer, GCHandleType.Pinned);
+            _tagPin   = GCHandle.Alloc(_tagBuffer,   GCHandleType.Pinned);
         }
 
         // ------------------------------------------------------------------ //
@@ -188,37 +200,34 @@ namespace WgSharp.Crypto
 
         /// <summary>
         /// Encrypt plaintext[offset..offset+length] with the given 12-byte nonce.
-        /// Returns ciphertext || 16-byte tag, matching the managed implementation's
-        /// output format exactly.
+        /// Returns a new byte[] containing ciphertext || 16-byte tag.
+        /// Thread-safe via internal lock (CNG key handles are not re-entrant).
         /// </summary>
         public byte[] Encrypt(byte[] plaintext, int offset, int length, byte[] nonce12)
         {
             if (_disposed) throw new ObjectDisposedException("CngChaCha20Poly1305");
 
-            byte[] output = new byte[length + TagSize];
-            byte[] tagBuffer = new byte[TagSize];
-
-            // Pin the nonce and tag buffer so we can hand pointers to CNG.
-            GCHandle noncePin = GCHandle.Alloc(nonce12, GCHandleType.Pinned);
-            GCHandle tagPin = GCHandle.Alloc(tagBuffer, GCHandleType.Pinned);
-            try
+            // Ensure the reusable output buffer is large enough.
+            int needed = length + TagSize;
+            byte[] output;
+            lock (_lock)
             {
-                var authInfo = new BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO();
-                authInfo.cbSize = (uint)Marshal.SizeOf(authInfo);
-                authInfo.dwInfoVersion = BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO_VERSION;
-                authInfo.pbNonce = noncePin.AddrOfPinnedObject();
-                authInfo.cbNonce = NonceSize;
-                authInfo.pbAuthData = IntPtr.Zero; // no AAD for WireGuard transport
-                authInfo.cbAuthData = 0;
-                authInfo.pbTag = tagPin.AddrOfPinnedObject();
-                authInfo.cbTag = TagSize;
-                authInfo.pbMacContext = IntPtr.Zero;
-                authInfo.cbMacContext = 0;
-                authInfo.cbAAD = 0;
-                authInfo.cbData = 0;
-                authInfo.dwFlags = 0;
+                if (_encryptBuf.Length < needed) _encryptBuf = new byte[needed + 256]; // headroom
+                output = null; // assigned inside the lock below
 
-                // Slice the plaintext if needed.
+                // Copy nonce into the pre-pinned scratch buffer.
+                Array.Copy(nonce12, _nonceBuffer, NonceSize);
+                // Zero the tag scratch so stale bytes never leak out on error.
+                Array.Clear(_tagBuffer, 0, TagSize);
+
+                var authInfo = new BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO();
+                authInfo.cbSize        = (uint)Marshal.SizeOf(authInfo);
+                authInfo.dwInfoVersion = BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO_VERSION;
+                authInfo.pbNonce       = _noncePin.AddrOfPinnedObject();
+                authInfo.cbNonce       = NonceSize;
+                authInfo.pbTag         = _tagPin.AddrOfPinnedObject();
+                authInfo.cbTag         = TagSize;
+
                 byte[] pt = plaintext;
                 if (offset != 0 || length != plaintext.Length)
                 {
@@ -227,30 +236,26 @@ namespace WgSharp.Crypto
                 }
 
                 uint cbResult;
-                int status;
-                lock (_lock)
-                {
-                    status = BCryptEncrypt(_key, pt, (uint)length, ref authInfo,
-                        IntPtr.Zero, 0, output, (uint)length, out cbResult, 0);
-                }
-
+                int status = BCryptEncrypt(_key, pt, (uint)length, ref authInfo,
+                    IntPtr.Zero, 0, _encryptBuf, (uint)length, out cbResult, 0);
                 if (status != 0)
                     throw new Exception("BCryptEncrypt failed: 0x" + status.ToString("X8"));
 
-                // Append the tag after the ciphertext.
-                Array.Copy(tagBuffer, 0, output, length, TagSize);
-                return output;
+                // Return a correctly-sized copy: ciphertext || tag.
+                output = new byte[needed];
+                Array.Copy(_encryptBuf, 0, output, 0, length);
+                Array.Copy(_tagBuffer, 0, output, length, TagSize);
             }
-            finally
-            {
-                noncePin.Free();
-                tagPin.Free();
-            }
+            return output;
         }
 
         /// <summary>
         /// Decrypt msg[Tr_Payload..] which is ciphertext || 16-byte tag.
         /// Returns plaintext, or null if the tag is invalid (wrong key/nonce/tampered).
+        /// </summary>
+        /// <summary>
+        /// Decrypt ciphertextAndTag[0..length] (ciphertext || 16-byte tag).
+        /// Returns plaintext, or null if the tag is invalid.
         /// </summary>
         public byte[] Decrypt(byte[] ciphertextAndTag, int length, byte[] nonce12)
         {
@@ -258,65 +263,42 @@ namespace WgSharp.Crypto
             if (length < TagSize) return null;
 
             int ctLen = length - TagSize;
-
-            // CNG wants ciphertext and tag in separate buffers.
             byte[] ct = new byte[ctLen];
             Array.Copy(ciphertextAndTag, 0, ct, 0, ctLen);
-
-            byte[] tagBuffer = new byte[TagSize];
-            Array.Copy(ciphertextAndTag, ctLen, tagBuffer, 0, TagSize);
-
             byte[] pt = new byte[ctLen];
 
-            GCHandle noncePin = GCHandle.Alloc(nonce12, GCHandleType.Pinned);
-            GCHandle tagPin = GCHandle.Alloc(tagBuffer, GCHandleType.Pinned);
-            try
+            lock (_lock)
             {
+                Array.Copy(nonce12, _nonceBuffer, NonceSize);
+                Array.Copy(ciphertextAndTag, ctLen, _tagBuffer, 0, TagSize);
+
                 var authInfo = new BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO();
-                authInfo.cbSize = (uint)Marshal.SizeOf(authInfo);
+                authInfo.cbSize        = (uint)Marshal.SizeOf(authInfo);
                 authInfo.dwInfoVersion = BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO_VERSION;
-                authInfo.pbNonce = noncePin.AddrOfPinnedObject();
-                authInfo.cbNonce = NonceSize;
-                authInfo.pbAuthData = IntPtr.Zero;
-                authInfo.cbAuthData = 0;
-                authInfo.pbTag = tagPin.AddrOfPinnedObject();
-                authInfo.cbTag = TagSize;
-                authInfo.pbMacContext = IntPtr.Zero;
-                authInfo.cbMacContext = 0;
-                authInfo.cbAAD = 0;
-                authInfo.cbData = 0;
-                authInfo.dwFlags = 0;
+                authInfo.pbNonce       = _noncePin.AddrOfPinnedObject();
+                authInfo.cbNonce       = NonceSize;
+                authInfo.pbTag         = _tagPin.AddrOfPinnedObject();
+                authInfo.cbTag         = TagSize;
 
                 uint cbResult;
-                int status;
-                lock (_lock)
-                {
-                    status = BCryptDecrypt(_key, ct, (uint)ctLen, ref authInfo,
-                        IntPtr.Zero, 0, pt, (uint)ctLen, out cbResult, 0);
-                }
-
-                // STATUS_AUTH_TAG_MISMATCH (0xC000A002) — wrong tag, bad packet.
-                // Any non-zero status means decryption failed; return null so the
-                // caller drops the packet, exactly as the managed path does.
+                int status = BCryptDecrypt(_key, ct, (uint)ctLen, ref authInfo,
+                    IntPtr.Zero, 0, pt, (uint)ctLen, out cbResult, 0);
                 if (status != 0) return null;
-                return pt;
             }
-            finally
-            {
-                noncePin.Free();
-                tagPin.Free();
-            }
+            return pt;
         }
 
         public void Dispose()
         {
             lock (_lock)
             {
-                if (!_disposed && _key != IntPtr.Zero)
+                if (!_disposed)
                 {
-                    BCryptDestroyKey(_key);
-                    _key = IntPtr.Zero;
                     _disposed = true;
+                    if (_key != IntPtr.Zero) { BCryptDestroyKey(_key); _key = IntPtr.Zero; }
+                    // Free the pre-pinned nonce/tag handle pairs.
+                    if (_noncePin.IsAllocated) _noncePin.Free();
+                    if (_tagPin.IsAllocated)   _tagPin.Free();
                 }
             }
         }

@@ -238,38 +238,45 @@ namespace WgSharp.Ui
             string lastName = ServiceState.GetLastTunnel();
             if (string.IsNullOrEmpty(lastName)) return;
 
-            // Make sure the tunnel still exists in the config store.
             if (!ConfigStore.Exists(lastName)) return;
 
             // If the service is installed and running: CheckForRunningServiceTunnel
             // will have already picked it up (or it's still starting). Don't race it.
             if (ServiceInstaller.IsInstalled() && ServiceInstaller.IsRunning()) return;
 
-            // No active tunnel, but we have a last-tunnel record. Auto-activate.
-            Log("Auto-reconnecting to '" + lastName + "' (was active before last restart).");
-
             // Select it in the list first so the activation picks the right one.
             int idx = lstTunnels.Items.IndexOf(lastName);
-            if (idx < 0)
-            {
-                // Not in the list yet — may be a fresh launch with no selection.
-                lstTunnels.Items.Add(lastName);
-                idx = lstTunnels.Items.IndexOf(lastName);
-            }
+            if (idx < 0) { lstTunnels.Items.Add(lastName); idx = lstTunnels.Items.IndexOf(lastName); }
             if (idx >= 0) lstTunnels.SelectedIndex = idx;
             _tunnelName = lastName;
 
-            // Small delay so the UI has settled before activation starts.
+            // Delay before activating: the server-side WireGuard session from the
+            // previous connection may still be valid. Connecting immediately can
+            // produce a brief conflict where the server ignores our new initiation
+            // because it already has an active session for our public key. 3 seconds
+            // is enough for the previous process to fully exit and for the network
+            // stack to settle, while still being fast enough to be unnoticeable.
             var t = new System.Windows.Forms.Timer();
-            t.Interval = 500;
+            t.Interval = 3000;
             t.Tick += delegate
             {
                 t.Stop();
                 t.Dispose();
-                if (!_active && !_busy) BeginActivate();
+                if (!_active && !_busy)
+                {
+                    Log("Auto-reconnecting to '" + lastName + "' (was active before last restart).");
+                    _autoReconnectName = lastName;
+                    _autoReconnectNegotiatingTicks = 0;
+                    BeginActivate();
+                }
             };
             t.Start();
         }
+
+        // Tracks an auto-reconnect attempt so OnStatusTick can detect a stuck
+        // Negotiating state and do one silent disconnect+reconnect to clear it.
+        private string _autoReconnectName;
+        private int _autoReconnectNegotiatingTicks;
 
         private void ApplyToolbarIcons()
         {
@@ -1318,6 +1325,41 @@ namespace WgSharp.Ui
                 _valTransfer.Text = FormatBytes(s.RxBytes) + " received, " + FormatBytes(s.TxBytes) + " sent";
             if (_valEndpoint != null) _valEndpoint.Text = s.Endpoint;
             lstTunnels.Invalidate();
+
+            // Self-healing: if this was an auto-reconnect and we've been stuck
+            // Negotiating for ~12 seconds, do one silent disconnect+reconnect.
+            // The server may still have the previous session open, causing it
+            // to ignore the new handshake initiation. A single reconnect after
+            // a brief pause clears that without the user having to do it manually.
+            if (!string.IsNullOrEmpty(_autoReconnectName) &&
+                _activeTunnelName == _autoReconnectName &&
+                !connected && s.State == "Handshaking")
+            {
+                _autoReconnectNegotiatingTicks++;
+                if (_autoReconnectNegotiatingTicks == 12) // ~12 seconds
+                {
+                    _autoReconnectName = null;
+                    _autoReconnectNegotiatingTicks = 0;
+                    Log("Auto-reconnect: still negotiating after 12s — retrying once to clear stale server session.");
+                    // Deactivate then re-activate after a short pause.
+                    DeactivateTunnel();
+                    var retry = new System.Windows.Forms.Timer();
+                    retry.Interval = 2000;
+                    retry.Tick += delegate
+                    {
+                        retry.Stop();
+                        retry.Dispose();
+                        if (!_active && !_busy) BeginActivate();
+                    };
+                    retry.Start();
+                }
+            }
+            else if (connected && !string.IsNullOrEmpty(_autoReconnectName))
+            {
+                // Connected successfully — clear the tracker.
+                _autoReconnectName = null;
+                _autoReconnectNegotiatingTicks = 0;
+            }
         }
 
         private static string FriendlyState(string state)

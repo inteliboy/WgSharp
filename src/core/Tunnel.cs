@@ -548,9 +548,9 @@ namespace WgSharp.Core
             {
                 if (!_adapter.WaitForPacket(250)) continue;
                 byte[] pkt;
+                long txThisDrain = 0;
                 while ((pkt = _adapter.ReceivePacket()) != null)
                 {
-                    // Route by destination IP -> peer (longest-prefix AllowedIPs).
                     IPAddress dest = AllowedIpRouter.DestinationOf(pkt, pkt.Length);
                     PeerState p = null;
                     if (dest != null)
@@ -558,21 +558,22 @@ namespace WgSharp.Core
                         int idx = _router.Lookup(dest);
                         if (idx >= 0 && idx < _peers.Count) p = _peers[idx];
                     }
-                    if (p == null && _peers.Count == 1) p = _peers[0]; // single-peer fast path
-                    if (p == null) continue;                            // no route: drop
+                    if (p == null && _peers.Count == 1) p = _peers[0];
+                    if (p == null) continue;
 
                     Session s = p.Session;
-                    if (s == null || p.Endpoint == null) continue;      // not connected yet: drop
+                    if (s == null || p.Endpoint == null) continue;
                     try
                     {
                         byte[] msg = s.Encrypt(pkt, 0, pkt.Length);
                         if (_awg) msg = AwgFraming.WrapTransport(msg, _cfg.EffectiveH4);
                         _udp.SendTo(msg, msg.Length, p.Endpoint);
                         p.LastSent = DateTime.UtcNow;
-                        lock (_statusLock) _status.TxBytes += pkt.Length;
+                        txThisDrain += pkt.Length;
                     }
                     catch (Exception ex) { Log(WgSharp.Core.Logger.DebugMarker + "Outbound error: " + ex.Message); }
                 }
+                if (txThisDrain > 0) lock (_statusLock) { _status.TxBytes += txThisDrain; }
             }
         }
 
@@ -632,7 +633,10 @@ namespace WgSharp.Core
                     try
                     {
                         _adapter.SendPacket(pt, 0, pt.Length);
-                        lock (_statusLock) _status.RxBytes += pt.Length;
+                        // Update RxBytes under the existing status lock — inbound
+                        // arrives one datagram at a time so batching doesn't help
+                        // here the way it does on the outbound drain loop.
+                        lock (_statusLock) { _status.RxBytes += pt.Length; }
                     }
                     catch (Exception ex) { Log(WgSharp.Core.Logger.DebugMarker + "Inject error: " + ex.Message); }
                 }
