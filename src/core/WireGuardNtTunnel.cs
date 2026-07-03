@@ -247,6 +247,66 @@ namespace WgSharp.Core
         private const uint IF_HAS_LISTEN_PORT = 1 << 2;
         private const uint IF_REPLACE_PEERS = 1 << 3;
         // Peer flags.
+        // IPv4 DNS servers from the config that are NOT covered by any peer's
+        // AllowedIPs. These need special handling in two places (kept in sync
+        // by sharing this one helper):
+        //   1) BuildConfigBlob injects them as hidden /32 AllowedIP entries for
+        //      the first peer — the kernel driver enforces AllowedIPs as its
+        //      cryptokey routing table and DROPS any packet whose destination
+        //      isn't in some peer's list (that's the IP_GENERAL_FAILURE /
+        //      0x2b2a every ping to such a DNS server used to hit). An OS
+        //      route alone only gets the packet TO the adapter; the driver
+        //      still has to accept it.
+        //   2) ConfigureNetwork adds the OS /32 route so packets reach the
+        //      adapter in the first place.
+        // "Hidden" means config-only: nothing is written back to the user's
+        // [Peer] AllowedIPs. IPv6 DNS servers are out of scope here, same as
+        // the pre-existing route logic.
+        private System.Collections.Generic.List<IPAddress> UncoveredIPv4DnsServers()
+        {
+            var result = new System.Collections.Generic.List<IPAddress>();
+            System.Collections.Generic.List<string> servers;
+            try { servers = _cfg.DnsServers(); }
+            catch { return result; }
+            if (servers == null || servers.Count == 0) return result;
+
+            // Gather every IPv4 AllowedIPs network across all peers.
+            var allowed = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<uint, int>>();
+            foreach (Config.Peer p in _cfg.Peers)
+                foreach (string cidr in p.AllowedIPs)
+                {
+                    IPAddress dest; int prefix;
+                    if (!WgSharp.Tun.AdapterConfig.TryParseCidr(cidr, out dest, out prefix)) continue;
+                    if (dest.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) continue;
+                    byte[] db = dest.GetAddressBytes();
+                    uint net = (uint)(db[0] << 24 | db[1] << 16 | db[2] << 8 | db[3]);
+                    allowed.Add(new System.Collections.Generic.KeyValuePair<uint, int>(net, prefix));
+                }
+
+            foreach (string srv in servers)
+            {
+                IPAddress srvIp;
+                if (!IPAddress.TryParse(srv, out srvIp)) continue;
+                if (srvIp.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) continue;
+                byte[] sb = srvIp.GetAddressBytes();
+                uint srvUint = (uint)(sb[0] << 24 | sb[1] << 16 | sb[2] << 8 | sb[3]);
+
+                bool covered = false;
+                foreach (var cidr in allowed)
+                {
+                    if (cidr.Value == 0) { covered = true; break; }
+                    uint mask = cidr.Value == 32 ? 0xFFFFFFFFu : ~(0xFFFFFFFFu >> cidr.Value);
+                    if ((srvUint & mask) == (cidr.Key & mask)) { covered = true; break; }
+                }
+                if (covered) continue;
+
+                bool dup = false;
+                foreach (IPAddress e in result) if (e.Equals(srvIp)) { dup = true; break; }
+                if (!dup) result.Add(srvIp);
+            }
+            return result;
+        }
+
         private const uint PEER_HAS_PUBLIC_KEY = 1 << 0;
         private const uint PEER_HAS_PRESHARED_KEY = 1 << 1;
         private const uint PEER_HAS_KEEPALIVE = 1 << 2;
@@ -258,9 +318,24 @@ namespace WgSharp.Core
 
         private IntPtr BuildConfigBlob(out int totalLen)
         {
+            // DNS servers not covered by any peer's AllowedIPs get injected as
+            // hidden /32 entries for the FIRST peer (matching the managed
+            // backend, whose AllowedIpRouter maps implied DNS routes to peer 0).
+            // Without this the driver's cryptokey routing rejects the very
+            // packets the implied OS route steers into the adapter, so DNS —
+            // and any ping to the DNS server — fails with IP_GENERAL_FAILURE
+            // on split-tunnel configs. With multiple peers, list the DNS server
+            // in the intended peer's AllowedIPs explicitly to pick a different
+            // peer; the first is only the default.
+            var dnsExtras = UncoveredIPv4DnsServers();
+            if (_cfg.Peers.Count == 0) dnsExtras.Clear();
+            foreach (IPAddress dns in dnsExtras)
+                Log("DNS server " + dns + " added to peer 1's AllowedIPs (hidden, driver-side only) " +
+                    "so the tunnel accepts traffic to it.");
+
             // Count allowed-IPs across all peers to size the blob.
             int peerCount = _cfg.Peers.Count;
-            int aipTotal = 0;
+            int aipTotal = dnsExtras.Count;
             foreach (Config.Peer p in _cfg.Peers)
                 aipTotal += CountValidAllowedIps(p.AllowedIPs);
 
@@ -280,9 +355,14 @@ namespace WgSharp.Core
             Marshal.WriteInt32(blob, IF_PeersCount, peerCount);
 
             int off = IF_SIZE;
+            bool firstPeer = true;
             foreach (Config.Peer p in _cfg.Peers)
             {
                 int peerBase = off;
+                // The hidden DNS /32s ride on the first peer's entry list.
+                int extraCount = firstPeer ? dnsExtras.Count : 0;
+                firstPeer = false;
+
                 uint peerFlags = PEER_REPLACE_ALLOWED_IPS;
                 if (p.PublicKey != null) peerFlags |= PEER_HAS_PUBLIC_KEY;
                 if (p.PresharedKey != null) peerFlags |= PEER_HAS_PRESHARED_KEY;
@@ -298,7 +378,7 @@ namespace WgSharp.Core
                     Marshal.WriteInt16(blob, peerBase + PEER_Keepalive, unchecked((short)(ushort)p.PersistentKeepalive));
                 if (ep != null) WriteEndpoint(blob, peerBase + PEER_Endpoint, ep);
 
-                int aipCount = CountValidAllowedIps(p.AllowedIPs);
+                int aipCount = CountValidAllowedIps(p.AllowedIPs) + extraCount;
                 Marshal.WriteInt32(blob, peerBase + PEER_AllowedCount, aipCount);
 
                 off += PEER_SIZE;
@@ -313,6 +393,17 @@ namespace WgSharp.Core
                     WriteBytes(blob, off + AIP_Address, raw, raw.Length); // 4 or 16 bytes
                     Marshal.WriteInt16(blob, off + AIP_Family, unchecked((short)(v6 ? AF_INET6 : AF_INET)));
                     Marshal.WriteByte(blob, off + AIP_Cidr, (byte)prefix);
+                    // Flags = 0 (add).
+                    off += AIP_SIZE;
+                }
+
+                // ---- hidden DNS /32 entries (first peer only) ----
+                for (int i = 0; i < extraCount; i++)
+                {
+                    byte[] raw = dnsExtras[i].GetAddressBytes();
+                    WriteBytes(blob, off + AIP_Address, raw, raw.Length); // 4 bytes (IPv4 only)
+                    Marshal.WriteInt16(blob, off + AIP_Family, unchecked((short)AF_INET));
+                    Marshal.WriteByte(blob, off + AIP_Cidr, (byte)32);
                     // Flags = 0 (add).
                     off += AIP_SIZE;
                 }
@@ -403,52 +494,20 @@ namespace WgSharp.Core
                 }
             }
 
-            // If a configured DNS server isn't covered by AllowedIPs, route it
-            // through the tunnel automatically (implied route, not shown in
-            // AllowedIPs) so DNS resolves — the same fix as the managed
-            // backend. For the kernel driver, the OS route into the adapter is
-            // what matters here; a single-peer tunnel accepts the packets. If
-            // you use split-tunnel DNS with MULTIPLE peers on WireGuardNT, list
-            // the DNS server in the intended peer's AllowedIPs explicitly so
-            // the driver's crypto-routing sends it to the right peer.
+            // If a configured DNS server isn't covered by AllowedIPs, it needs
+            // BOTH halves of the fix: BuildConfigBlob already injected it into
+            // the first peer's AllowedIPs (so the kernel driver's cryptokey
+            // routing ACCEPTS the packets), and here we add the OS /32 route
+            // (so packets REACH the adapter at all). Route alone used to be the
+            // only half, and the driver dropped everything the route delivered.
             if (!ntRoutesAll)
             {
-                var ntDnsServers = _cfg.DnsServers();
-                if (ntDnsServers.Count > 0)
+                foreach (IPAddress srvIp in UncoveredIPv4DnsServers())
                 {
-                    var ntAllowed = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<uint, int>>();
-                    foreach (Config.Peer p in _cfg.Peers)
-                        foreach (string cidr in p.AllowedIPs)
-                        {
-                            IPAddress dest; int prefix;
-                            if (!WgSharp.Tun.AdapterConfig.TryParseCidr(cidr, out dest, out prefix)) continue;
-                            if (dest.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) continue;
-                            byte[] db = dest.GetAddressBytes();
-                            uint net = (uint)(db[0] << 24 | db[1] << 16 | db[2] << 8 | db[3]);
-                            ntAllowed.Add(new System.Collections.Generic.KeyValuePair<uint, int>(net, prefix));
-                        }
-                    foreach (string srv in ntDnsServers)
-                    {
-                        IPAddress srvIp;
-                        if (!IPAddress.TryParse(srv, out srvIp)) continue;
-                        if (srvIp.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork) continue;
-                        byte[] sb = srvIp.GetAddressBytes();
-                        uint srvUint = (uint)(sb[0] << 24 | sb[1] << 16 | sb[2] << 8 | sb[3]);
-                        bool covered = false;
-                        foreach (var cidr in ntAllowed)
-                        {
-                            if (cidr.Value == 0) { covered = true; break; }
-                            uint mask = cidr.Value == 32 ? 0xFFFFFFFFu : ~(0xFFFFFFFFu >> cidr.Value);
-                            if ((srvUint & mask) == (cidr.Key & mask)) { covered = true; break; }
-                        }
-                        if (!covered)
-                        {
-                            Log("DNS server " + srv + " isn't in AllowedIPs; routing it through the " +
-                                "tunnel automatically so DNS resolves (implied route).");
-                            try { WgSharp.Tun.AdapterConfig.AddRoute(luid, srvIp, 32); }
-                            catch (Exception ex) { Log(WgSharp.Core.Logger.DebugMarker + "DNS route for " + srv + " failed: " + ex.Message); }
-                        }
-                    }
+                    Log("DNS server " + srvIp + " isn't in AllowedIPs; routing it through the " +
+                        "tunnel automatically so DNS resolves (implied route).");
+                    try { WgSharp.Tun.AdapterConfig.AddRoute(luid, srvIp, 32); }
+                    catch (Exception ex) { Log(WgSharp.Core.Logger.DebugMarker + "DNS route for " + srvIp + " failed: " + ex.Message); }
                 }
             }
 
@@ -637,8 +696,8 @@ namespace WgSharp.Core
         // tunnel anyway — so it measured the wrong thing even when it worked.
         // BuildTunnelTargets instead produces an ordered list of in-tunnel
         // candidates (config DNS IPs, the .1 gateway of the interface subnet,
-        // our own interface address, the .1 of each specific AllowedIPs network,
-        // then the public endpoint last). PingLoop tries the current one and
+        // our own interface address, the .1 of each specific AllowedIPs network
+        // — or the host itself for /32 entries — then the public endpoint last). PingLoop tries the current one and
         // rotates to the next if it keeps failing, so a non-responding target
         // no longer leaves latency permanently blank — the whole point of the
         // fallback. A fresh Ping is created each cycle, since a Ping whose Send
@@ -655,9 +714,15 @@ namespace WgSharp.Core
             var targets = BuildTunnelTargets();
             if (targets.Count == 0) return;
 
-            // Try each candidate once, stop at first success. We don't care about
-            // the RTT here — the only goal is to put one packet into the tunnel so
-            // the kernel driver initiates a handshake and moves out of Negotiating.
+            // Ping EVERY candidate once (short timeout), rather than stopping at
+            // the first Send that doesn't throw. "Didn't throw" is not "entered
+            // the tunnel": a send to a target with no tunnel route sails out the
+            // default gateway and reports success while doing nothing for us,
+            // whereas an in-tunnel send can throw IP_GENERAL_FAILURE before the
+            // first handshake and STILL be the one that pokes the kernel driver
+            // into initiating. Neither outcome of Send is a reliable signal, so
+            // don't branch on it — just make one attempt per candidate. This is
+            // a handful of ICMP packets, once, at tunnel start.
             foreach (IPAddress target in targets)
             {
                 if (!_running) return;
@@ -668,10 +733,9 @@ namespace WgSharp.Core
                         Log(WgSharp.Core.Logger.DebugMarker +
                             "Split-tunnel wake-up ping to " + target + " (triggers first handshake).");
                         ping.Send(target, 1500);
-                        return; // packet sent — handshake will follow
                     }
                 }
-                catch { /* try next candidate */ }
+                catch { /* expected before the first handshake; keep sweeping */ }
             }
         }
 
@@ -865,8 +929,19 @@ namespace WgSharp.Core
         {
             byte[] b = addr.GetAddressBytes();
             if (b.Length != 4) return null;
+
+            // A /32 is a HOST route: the address itself is the only member and
+            // therefore the only valid ping target. network+1 would name the
+            // NEIGHBORING address (192.168.1.2/32 -> 192.168.1.3), which has no
+            // tunnel route at all — the ping then exits via the default gateway,
+            // never enters the tunnel, never triggers the kernel driver's first
+            // handshake, and the tunnel sits in "Handshaking" forever. This is
+            // exactly what broke split-tunnel configs whose AllowedIPs were all
+            // /32s. (/31 is fine below: network+1 is the other host of the pair.)
+            if (prefixLen >= 32) return addr;
+
             uint val = ((uint)b[0] << 24) | ((uint)b[1] << 16) | ((uint)b[2] << 8) | b[3];
-            uint mask = prefixLen == 0 ? 0u : (prefixLen >= 32 ? 0xFFFFFFFFu : ~((1u << (32 - prefixLen)) - 1));
+            uint mask = prefixLen == 0 ? 0u : ~((1u << (32 - prefixLen)) - 1);
             uint network = val & mask;
             uint first = network + 1;       // .1 of the subnet
             return new IPAddress(new byte[]

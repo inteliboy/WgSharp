@@ -58,8 +58,9 @@ transport data path. A WinForms GUI. All compiled with `csc.exe` alone —
 | 🛡️ **Leak-free kill-switch** | Built on the Windows Filtering Platform (WFP) with weighted permit/block filters — not a netsh firewall-rule approximation. |
 | 🔑 **Multi-peer & cryptokey routing** | mac2/cookie replies, endpoint re-resolution, persistent keepalive, full handshake/transport framing. |
 | 🌐 **Split-tunnel DNS auto-fix** | If the configured DNS server isn't covered by AllowedIPs, WgSharp automatically routes it through the tunnel so DNS works without requiring manual config changes. |
-| 🧯 **Self-authorizing firewall rules** | Pre-registers with Windows Firewall at startup, so the interactive "allow this app" prompt never interrupts you. |
+| 🧯 **Self-authorizing firewall rules** | The one-time setup pre-registers the exe with Windows Firewall, so the interactive "allow this app" prompt never interrupts you. |
 | 🚀 **Background service** | Reconnects your last tunnel *before login*, the same model the official client uses — a real `LocalSystem` service with the GUI as a thin client over a named pipe. |
+| 🙅 **No UAC prompt on launch** | The installed GUI runs unelevated (`asInvoker`). The MSI registers and starts the background service at install time, so an MSI install never prompts on launch at all; a non-MSI installed copy sets the service up on first Activate via a single UAC prompt. Portable mode instead asks you to run it as administrator (see [Portable mode](#portable-mode-and-passwords)). |
 | 🖥️ **GUI autostart** | Optionally launches the tray app at login too, independent of the boot-time service. |
 | 📦 **Drag-and-drop import** | `.conf` / `.zip` / `.wgsp` straight onto the tunnel list. |
 | 🔒 **Portable mode** | Password-encrypted configs that travel with the app folder, with per-tunnel passwords cached for the session. |
@@ -148,6 +149,17 @@ environment variable, then the usual Program Files path), `build.cmd` skips
 it with a clear `[SKIP]` message and the exe build above is unaffected either
 way — the MSI is a convenience, not a requirement.
 
+**Optional code signing.** After building the exe (and, if present, the MSI),
+`build.cmd` Authenticode-signs both if a code-signing certificate is installed
+— matched by subject substring (default `SMCE`; override with the `SIGN_CERT`
+environment variable) the same way `signtool /n` matches. It signs the exe
+*before* the MSI is built so the installer packs the signed binary. This is
+entirely self-disabling: no matching certificate, or no `signtool.exe` on the
+machine, and signing is skipped with a note while the build proceeds unsigned;
+a signing failure (e.g. an unreachable timestamp server) warns but never fails
+the build. `signtool.exe` is located via a `SIGNTOOL` environment variable, the
+newest Windows 10/11 SDK, or `PATH`, in that order.
+
 **Installing or upgrading automatically closes a running WgSharp** — both the
 GUI and the background service, which are the same exe — before touching
 files:
@@ -202,10 +214,11 @@ a proper install implies "set this up the way I'd actually want it running" —
 see `src\core\InstallLocation.cs`, which detects whether the running exe lives
 at that exact fixed path:
 
-- On first run only, **Start GUI at login** and the **background service**
-  (see [Background service](#background-service-reconnect-before-login)) are
-  both turned on automatically — no trip to Settings needed. You can still
-  turn either back off afterward; this only sets the starting point.
+- The **background service** is registered *and started by the MSI itself*
+  at install time (it's already elevated), so the unelevated GUI never has to
+  prompt just to set it up — an MSI install shows no UAC prompt on launch at
+  all. **Start GUI at login** is also enabled as the intended starting point.
+  You can turn either back off afterward.
 - **Portable mode is unavailable**, persistently, not just at first run — its
   checkbox in Settings is disabled outright. Portable mode is for the
   standalone/zip distribution that travels with its own folder; it doesn't
@@ -214,9 +227,11 @@ at that exact fixed path:
 
 None of this applies to a copy run from anywhere else (the zip distribution,
 a USB stick, a dev build) — those keep today's defaults (everything off,
-portable mode available) exactly as before. The installer itself doesn't
-install/start the service or touch the Windows Firewall directly; that
-first-run behavior happens inside the app itself, the moment it starts.
+portable mode available) exactly as before. The installer registers and
+starts the background service (via WiX `ServiceInstall` / `ServiceControl`),
+but does **not** touch the Windows Firewall or enable login autostart at the
+MSI level — firewall pre-authorization is the service's / app's own job, and
+autostart is set by the app on first run.
 
 **Uninstalling removes everything**, including the two files the MSI never
 technically installed in the first place: `wintun.dll` and `wireguard.dll`
@@ -229,16 +244,37 @@ install directory itself.
 
 ## Run
 
-Run `WgSharp.exe` **as administrator** — the manifest forces the elevation
-prompt, since creating the network adapter and managing routes/firewall rules
-both require it.
+**The installed build runs without a UAC prompt.** Its manifest requests
+`asInvoker`, so launching `WgSharp.exe` shows no elevation dialog. All the
+privileged work (creating the adapter, routes, DNS, firewall) happens in the
+`WgSharpSvc` background service, which runs as `LocalSystem`. The first time
+you need it, WgSharp performs a **one-time** administrator setup: a single UAC
+prompt that registers and starts that service and pre-authorizes the firewall.
+(With the MSI installer this already happened at install time, so there's no
+prompt at all — see [MSI installer](#msi-installer-optional).) Every launch
+after that is prompt-free, and controlling tunnels needs no
+elevation — the service authorizes control commands by checking that your
+Windows account is a member of the Administrators group, including via the UAC
+*linked token*, so an admin's unelevated GUI is accepted without a prompt while
+a standard user is refused.
 
-On first startup, WgSharp downloads the native drivers it needs in the
-background:
+**Portable / non-installed use needs administrator rights.** A portable copy
+installs no service by design, so it must run elevated to create the adapter
+itself. If you launch a portable copy unelevated, WgSharp opens read-only —
+you can browse and edit tunnels, but **Connect is disabled** — and tells you to
+relaunch it with **right-click → Run as administrator**. Once elevated, a
+portable copy runs the tunnel in-process, touching nothing on the machine.
+Portable mode and the background service are mutually exclusive: portable never
+uses (or installs) the service, and an installed copy in `Program Files` can't
+switch to portable mode.
+
+On first startup, the background service downloads the native drivers it needs
+in the background (the installed build does this inside the service as
+`LocalSystem`; an elevated portable copy does it itself):
 
 - `wintun.dll` — always, verified against a pinned SHA-256.
 - `wireguard.dll` (WireGuardNT) — best-effort, for the optional kernel backend,
-  verified by Authenticode signature (see [License](#license)).
+  verified by Authenticode signature and publisher (see [License](#license)).
 
 You can also drop either DLL next to the executable yourself to skip the
 download. Routine download/verification log lines only show up in the Log
@@ -409,49 +445,53 @@ stuck rules, no requiring a reboot to recover network access.
 
 ## Background service: reconnect before login
 
-WgSharp can optionally run as a Windows Service that owns the actual tunnel
-and starts at boot — before anyone logs in — following the same model the
-official WireGuard for Windows client uses.
+WgSharp runs the actual tunnel inside a Windows Service (`WgSharpSvc`,
+`LocalSystem`) that starts at boot — before anyone logs in — following the
+same model the official WireGuard for Windows client uses. This is also what
+lets the GUI run unelevated: the service owns everything that needs
+administrator rights, and the GUI is a thin client driving it over a named
+pipe.
 
-The key design point (taken directly from how the official client works):
-**activating a tunnel is starting the service, and deactivating is stopping
-it.** The slow part of connecting — creating the adapter, configuring routes,
-bringing up the driver — is the service's *own startup*, and the Windows
-Service Control Manager (SCM) owns that multi-second operation, with its own
-start/stop timeouts and state machine. The GUI just asks SCM to start or stop
-the service; it does not send a "connect" command and wait on it. (An earlier
-version of WgSharp did exactly that — sent activation as a named-pipe command
-and waited for the whole bring-up on one request — which held the pipe open
-too long and broke. SCM is the right tool for a long-running start.) The pipe
-that remains is used only for instant runtime queries: live status, transfer
-counters, handshake time.
+The service is an **always-running manager** (registered `start= auto`), idle
+when no tunnel is active. Activation and deactivation are pipe commands
+(`ACTIVATE` / `DEACTIVATE`), not Service Control Manager start/stop — that's
+the change that removes the per-launch UAC prompt, since driving SCM would
+require an elevated GUI. Two design points, both hard-won:
+
+- **Control commands are admin-gated.** `ACTIVATE`, `DEACTIVATE`, and the
+  config-write commands are only honored if the pipe client's user is in the
+  Administrators group, checked against the client's UAC *linked* token so an
+  admin's unelevated GUI passes with no prompt and a standard user is refused.
+  Read-only queries (status, transfer counters, handshake time, log) stay open
+  to any authenticated user.
+- **A control command never blocks on the bring-up.** The service validates
+  the request and replies instantly; the multi-second adapter/route work runs
+  on its own worker thread, and the GUI follows progress by polling status
+  (exactly as it always did). An earlier design held the pipe open for the
+  whole bring-up and timed out; a later one made activation an SCM *start* and
+  forced the GUI to be elevated. This model avoids both.
 
 It's the same `WgSharp.exe`, not a second file: `Main()` checks for a
 `--service` argument (which the service registration includes, so SCM always
-launches it that way) and runs as the service instead of the GUI in that
-case. Registering/removing the service is `sc create`/`sc delete` pointing at
-the running exe's own path; starting/stopping it at runtime uses
-`ServiceController` — the same "use the OS's own service tools, we're already
-elevated" approach throughout.
+launches it that way) and runs as the service instead of the GUI in that case.
+A separate `--elevated-setup` argument is what the one-time UAC prompt runs to
+register + start the service and pre-authorize the firewall.
 
-Turn it on via **Settings → Start with Windows (background service)**, which
-registers the service (demand-start, so it's idle until you connect). After
-that, clicking Activate starts the service (bringing the tunnel up as a
-LocalSystem process that survives logout); clicking Deactivate stops it. While
-a tunnel is connected through the service, its start type is flipped to
-automatic so a reboot reconnects it before login; an explicit disconnect
-flips it back, so a disconnected tunnel stays disconnected across reboots. On
+Turn it on (or off) via **Settings → Start with Windows (background service)**.
+When a tunnel is connected through the service, the service records it as the
+"last tunnel" (in `HKEY_LOCAL_MACHINE\Software\WgSharp`), and re-activates it
+at the next boot — reconnecting before login; an explicit Deactivate clears
+that record, so a disconnected tunnel stays disconnected across reboots. On
 launch the GUI also checks whether the service is already running a tunnel
 (most notably one auto-reconnected at boot, before you logged in) and reflects
 that immediately.
 
-**This only works for non-portable tunnels.** Non-portable configs are
-already encrypted with machine-scoped DPAPI (decryptable by any admin/SYSTEM
-process on the box, which is exactly what a pre-login service is), so the
-service can read them with no one present. Portable mode is password-
-protected by design — there's no human at a boot-time service to type that
-password, so portable tunnels always run in the GUI itself, never through the
-service, regardless of whether it's installed.
+**This only works for non-portable tunnels.** Non-portable configs are already
+encrypted with machine-scoped DPAPI (decryptable by any admin/SYSTEM process on
+the box, which is exactly what a pre-login service is), so the service can read
+them with no one present. Portable mode is password-protected by design —
+there's no human at a boot-time service to type that password — so portable
+tunnels always run in the (elevated) GUI itself, never through the service.
 
 ## Settings
 
@@ -574,6 +614,12 @@ HMAC-SHA256, encrypt-then-MAC), so importing one into any WgSharp install is
 recognized automatically and prompts for its password; importing into a
 non-portable install decrypts it straight into the normal DPAPI store.
 
+Because a portable copy installs no background service, it needs administrator
+rights to create the adapter itself. Launched unelevated, it opens read-only
+(browse and edit, but Connect is disabled) and asks you to relaunch with
+**right-click → Run as administrator**; launched elevated, it runs the tunnel
+in-process and leaves no machine footprint. See [Run](#run).
+
 ## Architecture
 
 ```
@@ -602,26 +648,31 @@ src/
     AllowedIpRouter.cs             longest-prefix-match cryptokey routing
     PeerState.cs                   per-peer runtime state
     ConfigStore.cs                 DPAPI / portable-encrypted config storage
+    ConfigWriter.cs                config save/delete, with service fallback for admin-owned files
     PortableCrypto.cs              AES-256-CBC + HMAC, encrypt-then-MAC
     AppSettings.cs                  persisted app settings (HKLM registry; file in portable mode)
+    Elevation.cs                     elevation check + one-time "runas" self-launch
+    InstallLocation.cs                installed-vs-portable detection + first-run defaults
     Logger.cs                        Log-tab/service verbosity gate (Debug log toggle)
     LoginAutostart.cs                 per-user "start GUI at login" Run-key entry
-    ServiceProtocol.cs              GUI<->service named-pipe wire format
+    ServiceProtocol.cs              GUI<->service named-pipe wire format (+ escaping)
     ServiceClient.cs                 GUI-side pipe client
-    ServiceInstaller.cs              sc.exe wrapper (install/uninstall)
+    ServiceInstaller.cs              sc.exe wrapper (register auto-start manager / remove)
+    ElevatedSetup.cs                 --elevated-setup: register+start service, firewall pre-auth
     ServiceState.cs                   persisted "last connected tunnel" (HKLM registry)
-    RemoteTunnelBackend.cs            ITunnelBackend that forwards to the service
+    RemoteTunnelBackend.cs            ITunnelBackend that drives the service over the pipe
   tun/
     Wintun.cs                     wintun.dll P/Invoke + managed wrapper
     WintunDownloader.cs             signed-download + SHA-256 verification
-    WireGuardNtDownloader.cs         wireguard.dll download + Authenticode verification
+    WireGuardNtDownloader.cs         wireguard.dll download + Authenticode/publisher verification
     DriverBootstrap.cs              fetches both drivers at startup
     AdapterConfig.cs                address/route/DNS/MTU/interface-metric setup
     KillSwitch.cs                    kill-switch facade (delegates to WFP)
     WfpKillSwitch.cs                 WFP P/Invoke kill-switch implementation
     FirewallSelfRegister.cs          pre-authorizes the exe with Windows Firewall
   svc/                            background-service mode (same exe; see Program.cs)
-    WgSharpService.cs              ServiceBase host + named-pipe server
+    WgSharpService.cs              ServiceBase host + named-pipe manager server
+    PipeClientAuth.cs               admin-gates pipe control commands (UAC linked-token check)
   ui/                             WinForms GUI (hand-written, no .resx)
 ```
 

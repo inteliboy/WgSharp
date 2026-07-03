@@ -58,8 +58,6 @@ namespace WgSharp.Core
 
         /// <summary>
         /// Extract the destination IP from a raw IPv4/IPv6 packet, or null.
-        /// Reads IPv4 addresses directly as a long (network byte order) to
-        /// avoid allocating a temporary byte[] on every outbound packet.
         /// </summary>
         public static IPAddress DestinationOf(byte[] packet, int length)
         {
@@ -67,12 +65,18 @@ namespace WgSharp.Core
             int version = packet[0] >> 4;
             if (version == 4)
             {
-                // IPv4 destination at bytes 16..19.
-                // IPAddress(long) takes host byte order — reconstruct it that way.
+                // IPv4 destination at bytes 16..19, in network byte order. Use
+                // the byte[] constructor (which takes network order directly) so
+                // the octets are preserved — the same approach as the IPv6 path
+                // below. NOTE: do NOT reconstruct this via IPAddress(long); that
+                // constructor reads the low byte as the first octet, so packing
+                // packet[16] into the high byte reverses the address (e.g.
+                // 192.168.1.20 becomes 20.1.168.192), which silently breaks
+                // longest-prefix routing for any multi-peer / split-tunnel config.
                 if (length < 20) return null;
-                long addr = ((long)packet[16] << 24) | ((long)packet[17] << 16)
-                          | ((long)packet[18] <<  8) |  (long)packet[19];
-                return new IPAddress(addr);
+                byte[] d4 = new byte[4];
+                Array.Copy(packet, 16, d4, 0, 4);
+                return new IPAddress(d4);
             }
             if (version == 6)
             {

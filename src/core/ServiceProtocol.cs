@@ -6,21 +6,75 @@ namespace WgSharp.Core
     /// The wire format for the named pipe between the GUI and the background
     /// service. Deliberately tiny and text-based: one line in, one line out.
     ///
-    /// IMPORTANT: the pipe is used ONLY for quick runtime queries that return
-    /// instantly. Activation and deactivation are NOT pipe commands — they are
-    /// SCM start/stop of the service (see RemoteTunnelBackend / ServiceInstaller),
-    /// modeled on the official WireGuard client, where the slow tunnel bring-up
-    /// is the service's own SCM-managed startup, not a message held open on a
-    /// pipe. An earlier version did send an ACTIVATE command and waited for the
-    /// whole bring-up on that one request, which hung the pipe and broke things.
+    /// The service is a long-running MANAGER (installed start=auto, idle when
+    /// no tunnel is up), and activation/deactivation ARE pipe commands now —
+    /// but with the lesson of the earlier broken design baked in: a control
+    /// command only VALIDATES synchronously and replies immediately; the
+    /// multi-second adapter/route bring-up (or teardown) runs on a service
+    /// worker thread, never while a pipe request is held open. The GUI learns
+    /// the outcome the same way it always tracked progress: by polling STATUS
+    /// (and pumping LOG). This is what lets the GUI run unelevated
+    /// (asInvoker): SCM start/stop — which needs admin — is no longer the
+    /// activation mechanism.
     ///
-    /// Commands (client -> server), one per connection:
-    ///   PING    -> "PONG"
-    ///   STATUS  -> "INACTIVE" or "ACTIVE|name|state|tx|rx|hsUnixSeconds|latencyMs|endpoint"
+    /// Commands (client -> server), one line per connection:
+    ///   PING                       -> "PONG"
+    ///   STATUS                     -> "INACTIVE" or "ACTIVE|name|state|tx|rx|hsUnixSeconds|latencyMs|endpoint"
+    ///   LOG                        -> "LOG|" + escaped recent service log
+    ///   ACTIVATE|name              -> "OK" / "ERR|reason" / "DENIED"
+    ///   ACTIVATE2|name|escapedConf -> "OK" / "ERR|reason" / "DENIED"   (portable: config text supplied by the GUI)
+    ///   DEACTIVATE                 -> "OK" / "DENIED"
+    ///   SAVECONFIG|name|escapedConf-> "OK" / "ERR|reason" / "DENIED"   (machine store write, done as SYSTEM)
+    ///   DELETECONFIG|name          -> "OK" / "ERR|reason" / "DENIED"
+    ///
+    /// PING/STATUS/LOG remain open to any authenticated user (read-only).
+    /// Everything else is a CONTROL command: the service verifies the client
+    /// user is a member of Administrators — including via the UAC linked
+    /// token, so the unelevated GUI of an admin passes with no prompt — and
+    /// answers "DENIED" otherwise (see PipeClientAuth).
+    ///
+    /// Escaping (Escape/Unescape below): payloads that may contain newlines
+    /// or backslashes (config text, the LOG snapshot) travel with '\\' and
+    /// '\n' escaped so every message stays a single line. '|' needs no
+    /// escaping: commands are split on their FIRST one or two separators
+    /// only, and tunnel names can't contain '|' (ConfigStore.SanitizeName
+    /// strips it).
     /// </summary>
     public static class ServiceProtocol
     {
         public const string PipeName = "WgSharp_Control";
+
+        /// <summary>
+        /// Escapes a multi-line payload into a single pipe line. Lossless:
+        /// backslash, CR, and LF are encoded, everything else passes through,
+        /// so config text round-trips byte-identically (a WinForms editor
+        /// expects its CRLFs back exactly as saved).
+        /// </summary>
+        public static string Escape(string s)
+        {
+            if (s == null) return "";
+            return s.Replace("\\", "\\\\").Replace("\r", "\\r").Replace("\n", "\\n");
+        }
+
+        /// <summary>Reverses Escape.</summary>
+        public static string Unescape(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "";
+            var sb = new System.Text.StringBuilder(s.Length);
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c == '\\' && i + 1 < s.Length)
+                {
+                    char n = s[++i];
+                    if (n == 'n') sb.Append('\n');
+                    else if (n == 'r') sb.Append('\r');
+                    else sb.Append(n);
+                }
+                else sb.Append(c);
+            }
+            return sb.ToString();
+        }
         private static readonly DateTime Epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
         public static string FormatStatus(string name, TunnelStatus s)

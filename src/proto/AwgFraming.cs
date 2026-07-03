@@ -148,12 +148,19 @@ namespace WgSharp.Proto
             }
 
             // Transport: variable size (header + ciphertext), no S-byte
-            // padding in AWG; just the header magic differs.
+            // padding in AWG; just the header magic differs. This is the hot
+            // path (every data packet), so translate IN PLACE: rewrite the
+            // 4-byte header inside the caller's buffer and return that same
+            // buffer, instead of copying the whole datagram. The caller
+            // (Tunnel.InboundLoop) owns the receive buffer and passes
+            // (translated, length) onward, so mutating it is safe; Response
+            // and CookieReply above still return fresh exact-size arrays
+            // because the handshake consumers expect them (and they're rare).
             if (length >= Messages.TransportHeaderSize + 16 &&
                 Messages.ReadLE32(raw, 0) == h4)
             {
-                translated = Slice(raw, 0, length);
-                Messages.WriteLE32(translated, 0, Messages.TypeTransport);
+                Messages.WriteLE32(raw, 0, Messages.TypeTransport);
+                translated = raw;
                 return InboundKind.Transport;
             }
 

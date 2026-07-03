@@ -80,7 +80,11 @@ namespace WgSharp.Core
                 try { LoginAutostart.Enable(); } catch { }
                 try
                 {
-                    if (!ServiceInstaller.IsInstalled())
+                    // Registering with SCM needs elevation; the asInvoker GUI
+                    // usually isn't. When it isn't, this is simply deferred to
+                    // the one-time elevated setup (MainForm offers it at
+                    // startup whenever the service isn't running).
+                    if (Elevation.IsProcessElevated() && !ServiceInstaller.IsInstalled())
                     {
                         ServiceInstaller.Install();
                         AppSettings.ServiceWasInstalled = true;
@@ -108,6 +112,7 @@ namespace WgSharp.Core
             if (!IsInstalled()) return;
             if (!AppSettings.ServiceWasInstalled) return; // user never had it on
             if (ServiceInstaller.IsInstalled()) return;   // still registered; nothing to do
+            if (!Elevation.IsProcessElevated()) return;   // unelevated: the startup setup offer handles it
             try
             {
                 ServiceInstaller.Install();

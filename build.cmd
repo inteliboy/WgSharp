@@ -134,14 +134,19 @@ echo === Building amd64 -^> bin\amd64\WgSharp.exe ===
     /win32manifest:"app.manifest" ^
     /win32icon:"WgSharp.ico" ^
     %REFS% ^
-    /recurse:src\core\*.cs /recurse:src\crypto\*.cs /recurse:src\proto\*.cs /recurse:src\net\*.cs /recurse:src\tun\*.cs /recurse:src\ui\*.cs ^
-    "src\svc\WgSharpService.cs" ^
+    /recurse:src\core\*.cs /recurse:src\crypto\*.cs /recurse:src\proto\*.cs /recurse:src\net\*.cs /recurse:src\tun\*.cs /recurse:src\ui\*.cs /recurse:src\svc\*.cs ^
     "src\Program.cs"
 if %ERRORLEVEL% neq 0 (
     echo [BUILD FAILED] amd64 build returned %ERRORLEVEL%.
     popd
     exit /b %ERRORLEVEL%
 )
+
+rem --- Code signing: exe (must happen BEFORE the MSI is built, so the ---
+rem --- MSI packs the SIGNED exe). Silently skipped when the SIGN_CERT ---
+rem --- certificate isn't installed on this machine.                   ---
+call :sign_file "bin\amd64\WgSharp.exe"
+
 echo Sample config lives in README.md (no sample.conf is shipped/installed).
 
 rem --- MSI installer (WiX Toolset v3.14) -----------------------------
@@ -189,6 +194,10 @@ if %ERRORLEVEL% neq 0 (
 )
 echo [INSTALLER OK]
 echo   bin\amd64\WgSharp-Setup.msi  ^(version %VERSION%^)
+
+rem --- Code signing: MSI (same optional certificate as the exe) -------
+call :sign_file "bin\amd64\WgSharp-Setup.msi"
+
 :after_msi
 
 echo.
@@ -200,3 +209,80 @@ echo The background service (Settings -^> "Start with Windows") is the
 echo same exe, started by SCM instead of double-clicked -- no second file.
 popd
 exit /b 0
+
+rem ============================================================
+rem  Optional Authenticode signing.
+rem
+rem  :sign_file <path>  -- signs the file with the certificate whose
+rem  subject matches SIGN_CERT (default "SMCE"; override by setting the
+rem  SIGN_CERT environment variable before running build.cmd).
+rem
+rem  Entirely optional and self-disabling:
+rem    - If no matching certificate exists in the CurrentUser or
+rem      LocalMachine "My" store, signing is skipped with a note and the
+rem      build proceeds unsigned (so the script works unchanged on
+rem      machines without the cert).
+rem    - If the cert exists but signtool.exe can't be found, same skip.
+rem    - If signtool itself fails (e.g. timestamp server unreachable),
+rem      a warning is printed and the build continues -- an unsigned
+rem      build beats no build, and the warning makes it non-silent.
+rem
+rem  signtool is located in this order:
+rem    1. SIGNTOOL environment variable (full path to signtool.exe)
+rem    2. newest "%ProgramFiles(x86)%\Windows Kits\10\bin\10.*\x64"
+rem    3. anywhere on PATH
+rem
+rem  NOTE on being called this deep in the script: :sign_locate runs its
+rem  detection ONCE (SIGN_CHECKED flag) and both call sites reuse the
+rem  result. Everything uses plain (non-delayed) expansion -- `if defined`
+rem  is evaluated dynamically by cmd, so the for-loops below work without
+rem  enabledelayedexpansion, consistent with the header's warning about
+rem  parens in paths.
+rem ============================================================
+:sign_file
+if not defined SIGN_CHECKED call :sign_locate
+if not "%SIGN_READY%"=="1" goto :eof
+echo Signing %~1 ...
+"%SIGNTOOL_EXE%" sign /n "%SIGN_CERT%" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "%~1"
+if %ERRORLEVEL% neq 0 (
+    echo [WARN] signtool returned %ERRORLEVEL% for "%~1" -- continuing with it UNSIGNED.
+    echo        ^(Common cause: the timestamp server was unreachable. Re-run to retry.^)
+) else (
+    echo [SIGNED] %~1
+)
+goto :eof
+
+:sign_locate
+set "SIGN_CHECKED=1"
+set "SIGN_READY="
+if not defined SIGN_CERT set "SIGN_CERT=SMCE"
+
+rem -- is the certificate installed? Detection must match signtool's /n
+rem    semantics: /n matches a SUBSTRING of the certificate subject, so a
+rem    cert named "SMCE Sp. z o.o." is signable with /n "SMCE". certutil's
+rem    CertId lookup is (near-)exact on the CN and would false-negative on
+rem    such certs, so we use PowerShell (already a build dependency for the
+rem    date stamp) with the same substring rule, and require a private key
+rem    since a public-only cert can't sign anything.
+set "SIGN_CERT_FOUND="
+powershell -NoProfile -NonInteractive -Command "exit [int](-not ((Get-ChildItem Cert:\CurrentUser\My, Cert:\LocalMachine\My -ErrorAction SilentlyContinue) | Where-Object { $_.Subject -match [regex]::Escape($env:SIGN_CERT) -and $_.HasPrivateKey } | Measure-Object).Count)" >nul 2>&1 && set "SIGN_CERT_FOUND=1"
+if not defined SIGN_CERT_FOUND (
+    echo [SKIP] Code-signing certificate "%SIGN_CERT%" not found in the user or
+    echo        machine certificate store -- outputs will not be signed.
+    goto :eof
+)
+
+rem -- locate signtool.exe
+set "SIGNTOOL_EXE="
+if defined SIGNTOOL if exist "%SIGNTOOL%" set "SIGNTOOL_EXE=%SIGNTOOL%"
+if not defined SIGNTOOL_EXE for /f "delims=" %%d in ('dir /b /ad /o-n "%ProgramFiles(x86)%\Windows Kits\10\bin\10.*" 2^>nul') do if not defined SIGNTOOL_EXE if exist "%ProgramFiles(x86)%\Windows Kits\10\bin\%%d\x64\signtool.exe" set "SIGNTOOL_EXE=%ProgramFiles(x86)%\Windows Kits\10\bin\%%d\x64\signtool.exe"
+if not defined SIGNTOOL_EXE for /f "delims=" %%s in ('where signtool 2^>nul') do if not defined SIGNTOOL_EXE set "SIGNTOOL_EXE=%%s"
+if not defined SIGNTOOL_EXE (
+    echo [SKIP] Certificate "%SIGN_CERT%" is installed, but signtool.exe was not
+    echo        found ^(is a Windows 10/11 SDK installed?^) -- outputs will not be signed.
+    goto :eof
+)
+
+echo Code signing enabled: certificate "%SIGN_CERT%", tool: %SIGNTOOL_EXE%
+set "SIGN_READY=1"
+goto :eof

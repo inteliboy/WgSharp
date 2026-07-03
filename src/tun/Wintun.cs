@@ -185,6 +185,37 @@ namespace WgSharp.Tun
             }
         }
 
+        /// <summary>
+        /// Copy the next packet from the ring into a caller-supplied buffer.
+        /// Returns the packet length, or -1 if the ring is currently empty
+        /// (caller should WaitForPacket). This is the allocation-free variant
+        /// of ReceivePacket for the hot outbound path: the ring copy is
+        /// unavoidable (Wintun requires the slot to be released promptly),
+        /// but the per-packet byte[] allocation is not.
+        /// </summary>
+        public int ReceivePacket(byte[] buffer)
+        {
+            uint size;
+            IntPtr ptr = WintunNative.WintunReceivePacket(_session, out size);
+            if (ptr == IntPtr.Zero)
+            {
+                int err = Marshal.GetLastWin32Error();
+                if (err == ERROR_NO_MORE_ITEMS) return -1;
+                throw new Win32Exception(err, "WintunReceivePacket failed");
+            }
+            try
+            {
+                if (size > buffer.Length)
+                    throw new Exception("Wintun packet (" + size + " bytes) exceeds receive buffer.");
+                Marshal.Copy(ptr, buffer, 0, (int)size);
+                return (int)size;
+            }
+            finally
+            {
+                WintunNative.WintunReleaseReceivePacket(_session, ptr);
+            }
+        }
+
         /// <summary>Block until the ring has data or the timeout elapses.</summary>
         public bool WaitForPacket(int timeoutMs)
         {

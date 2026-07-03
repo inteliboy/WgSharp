@@ -544,14 +544,20 @@ namespace WgSharp.Core
         // ---------------- outbound: OS -> peer ----------------
         private void OutboundLoop()
         {
+            // Reusable packet buffer: WintunAdapter.ReceivePacket(byte[]) copies
+            // each packet out of the ring into this and Session.Encrypt reads it
+            // by (buffer, 0, length), encrypting straight into the outgoing
+            // transport message — so nothing on this path allocates per packet
+            // except the final UDP message itself.
+            byte[] rxBuf = new byte[65536];
             while (_running)
             {
                 if (!_adapter.WaitForPacket(250)) continue;
-                byte[] pkt;
+                int pktLen;
                 long txThisDrain = 0;
-                while ((pkt = _adapter.ReceivePacket()) != null)
+                while ((pktLen = _adapter.ReceivePacket(rxBuf)) > 0)
                 {
-                    IPAddress dest = AllowedIpRouter.DestinationOf(pkt, pkt.Length);
+                    IPAddress dest = AllowedIpRouter.DestinationOf(rxBuf, pktLen);
                     PeerState p = null;
                     if (dest != null)
                     {
@@ -565,11 +571,11 @@ namespace WgSharp.Core
                     if (s == null || p.Endpoint == null) continue;
                     try
                     {
-                        byte[] msg = s.Encrypt(pkt, 0, pkt.Length);
+                        byte[] msg = s.Encrypt(rxBuf, 0, pktLen);
                         if (_awg) msg = AwgFraming.WrapTransport(msg, _cfg.EffectiveH4);
                         _udp.SendTo(msg, msg.Length, p.Endpoint);
                         p.LastSent = DateTime.UtcNow;
-                        txThisDrain += pkt.Length;
+                        txThisDrain += pktLen;
                     }
                     catch (Exception ex) { Log(WgSharp.Core.Logger.DebugMarker + "Outbound error: " + ex.Message); }
                 }
@@ -580,14 +586,24 @@ namespace WgSharp.Core
         // ---------------- inbound: peer -> OS ----------------
         private void InboundLoop()
         {
+            // Reusable buffers: the socket fills recvBuf directly (no per-
+            // datagram allocation), transport payloads decrypt into ptBuf, and
+            // the adapter copies out of ptBuf into the Wintun ring before the
+            // next iteration — so the steady-state data path allocates nothing.
+            // Handshake-sized messages (rare: one every ~2 minutes) are copied
+            // into exact-size arrays because their consumers validate Length.
+            byte[] recvBuf = new byte[65536];
+            byte[] ptBuf = new byte[65536];
             while (_running)
             {
                 IPEndPoint from;
-                byte[] datagram;
-                try { datagram = _udp.ReceiveFrom(out from); }
+                int len;
+                try { len = _udp.ReceiveFrom(recvBuf, out from); }
                 catch (Exception ex) { Log(WgSharp.Core.Logger.DebugMarker + "Inbound recv error: " + ex.Message); continue; }
-                if (datagram == null || datagram.Length == 0) continue;
+                if (len <= 0) continue;
 
+                byte[] datagram = recvBuf;
+                int dlen = len;
                 if (_awg)
                 {
                     // Strip the AWG disguise (S-byte padding, H-value header)
@@ -598,30 +614,35 @@ namespace WgSharp.Core
                     // match the expected shape under our own H/S values is
                     // noise (e.g. a stray reflected junk packet) and is
                     // silently dropped, same as a malformed packet always was.
+                    // Transport messages are translated IN PLACE inside recvBuf
+                    // (header rewrite only); Response/CookieReply come back as
+                    // fresh exact-size arrays.
                     byte[] translated;
                     AwgFraming.InboundKind kind = AwgFraming.TranslateInbound(
-                        datagram, datagram.Length,
+                        recvBuf, len,
                         _cfg.EffectiveH2, _cfg.EffectiveH3, _cfg.EffectiveH4, _cfg.EffectiveS2,
                         out translated);
                     if (kind == AwgFraming.InboundKind.Unknown) continue;
                     datagram = translated;
+                    dlen = ReferenceEquals(translated, recvBuf) ? len : translated.Length;
                 }
 
                 byte type = datagram[0];
                 if (type == Messages.TypeResponse)
                 {
-                    OnResponse(datagram);
+                    if (dlen != Messages.ResponseSize) continue;
+                    OnResponse(ExactCopy(datagram, dlen));
                 }
                 else if (type == Messages.TypeTransport)
                 {
-                    if (datagram.Length < Messages.TransportHeaderSize) continue;
+                    if (dlen < Messages.TransportHeaderSize) continue;
                     uint receiver = Messages.ReadLE32(datagram, Messages.Tr_Receiver);
                     PeerState p = FindByLocalIndex(receiver, false);
                     if (p == null) continue;
                     Session s = p.Session;
                     if (s == null) continue;
-                    byte[] pt = s.Decrypt(datagram, datagram.Length);
-                    if (pt == null) continue;          // bad tag or replay
+                    int ptLen;
+                    if (!s.DecryptInto(datagram, dlen, ptBuf, out ptLen)) continue; // bad tag or replay
                     p.LastRecv = DateTime.UtcNow;
                     // Basic roaming: learn the peer's source address if it moved.
                     if (from != null && p.Endpoint != null && !from.Equals(p.Endpoint))
@@ -629,22 +650,35 @@ namespace WgSharp.Core
                         p.Endpoint = from;
                         p.EndpointAddress = from.Address;
                     }
-                    if (pt.Length == 0) continue;      // keepalive
+                    if (ptLen == 0) continue;          // keepalive
                     try
                     {
-                        _adapter.SendPacket(pt, 0, pt.Length);
+                        _adapter.SendPacket(ptBuf, 0, ptLen);
                         // Update RxBytes under the existing status lock — inbound
                         // arrives one datagram at a time so batching doesn't help
                         // here the way it does on the outbound drain loop.
-                        lock (_statusLock) { _status.RxBytes += pt.Length; }
+                        lock (_statusLock) { _status.RxBytes += ptLen; }
                     }
                     catch (Exception ex) { Log(WgSharp.Core.Logger.DebugMarker + "Inject error: " + ex.Message); }
                 }
                 else if (type == Messages.TypeCookieReply)
                 {
-                    OnCookieReply(datagram);
+                    if (dlen != Messages.CookieReplySize) continue;
+                    OnCookieReply(ExactCopy(datagram, dlen));
                 }
             }
+        }
+
+        // Copy the first n bytes into an exact-size array unless the source is
+        // already exact. Handshake consumers (OnResponse / ConsumeCookieReply)
+        // validate msg.Length, so messages arriving in the oversized reusable
+        // receive buffer must be trimmed; AWG-translated ones already are.
+        private static byte[] ExactCopy(byte[] src, int n)
+        {
+            if (src.Length == n) return src;
+            byte[] r = new byte[n];
+            Array.Copy(src, r, n);
+            return r;
         }
 
         // ---------------- timers ----------------

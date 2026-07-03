@@ -129,6 +129,32 @@ namespace WgSharp.Crypto
             out uint pcbResult,
             uint dwFlags);
 
+        // IntPtr-based variants of the same entry points, used by the
+        // EncryptInto/DecryptInto fast paths: they let us hand bcrypt an
+        // address *inside* a caller-owned array (pinned for the duration of
+        // the call), so the payload can be encrypted straight into the
+        // outgoing transport message and decrypted straight out of the
+        // receive buffer — no intermediate plaintext/ciphertext copies.
+        [DllImport("bcrypt.dll", EntryPoint = "BCryptEncrypt")]
+        private static extern int BCryptEncryptPtr(
+            IntPtr hKey,
+            IntPtr pbInput, uint cbInput,
+            ref BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO pPaddingInfo,
+            IntPtr pbIV, uint cbIV,
+            IntPtr pbOutput, uint cbOutput,
+            out uint pcbResult,
+            uint dwFlags);
+
+        [DllImport("bcrypt.dll", EntryPoint = "BCryptDecrypt")]
+        private static extern int BCryptDecryptPtr(
+            IntPtr hKey,
+            IntPtr pbInput, uint cbInput,
+            ref BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO pPaddingInfo,
+            IntPtr pbIV, uint cbIV,
+            IntPtr pbOutput, uint cbOutput,
+            out uint pcbResult,
+            uint dwFlags);
+
         // ------------------------------------------------------------------ //
         //  Availability probe (called once at startup)                         //
         // ------------------------------------------------------------------ //
@@ -172,10 +198,6 @@ namespace WgSharp.Crypto
         private readonly GCHandle _noncePin;
         private readonly GCHandle _tagPin;
 
-        // Reusable output buffer for Encrypt to avoid new byte[] per packet.
-        // Resized up (never down) as needed; capacity tracked separately.
-        private byte[] _encryptBuf = new byte[1500 + TagSize]; // pre-sized for MTU
-
         public CngChaCha20Poly1305(byte[] key32)
         {
             if (!_available) throw new NotSupportedException("CNG ChaCha20-Poly1305 is not available on this OS.");
@@ -199,25 +221,23 @@ namespace WgSharp.Crypto
         // ------------------------------------------------------------------ //
 
         /// <summary>
-        /// Encrypt plaintext[offset..offset+length] with the given 12-byte nonce.
-        /// Returns a new byte[] containing ciphertext || 16-byte tag.
-        /// Thread-safe via internal lock (CNG key handles are not re-entrant).
+        /// Encrypt plaintext[offset..offset+length) with the given 12-byte nonce,
+        /// writing ciphertext into outBuf[outOff..] and the 16-byte tag
+        /// immediately after (length + 16 bytes written in total). The caller's
+        /// arrays are pinned for the duration of the bcrypt call so no
+        /// intermediate copies are made. Thread-safe via the internal lock
+        /// (CNG key handles are not re-entrant).
         /// </summary>
-        public byte[] Encrypt(byte[] plaintext, int offset, int length, byte[] nonce12)
+        public void EncryptInto(byte[] plaintext, int offset, int length, byte[] nonce12,
+                                byte[] outBuf, int outOff)
         {
             if (_disposed) throw new ObjectDisposedException("CngChaCha20Poly1305");
+            if (outBuf.Length - outOff < length + TagSize)
+                throw new ArgumentException("Output buffer too small.");
 
-            // Ensure the reusable output buffer is large enough.
-            int needed = length + TagSize;
-            byte[] output;
             lock (_lock)
             {
-                if (_encryptBuf.Length < needed) _encryptBuf = new byte[needed + 256]; // headroom
-                output = null; // assigned inside the lock below
-
-                // Copy nonce into the pre-pinned scratch buffer.
                 Array.Copy(nonce12, _nonceBuffer, NonceSize);
-                // Zero the tag scratch so stale bytes never leak out on error.
                 Array.Clear(_tagBuffer, 0, TagSize);
 
                 var authInfo = new BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO();
@@ -228,63 +248,101 @@ namespace WgSharp.Crypto
                 authInfo.pbTag         = _tagPin.AddrOfPinnedObject();
                 authInfo.cbTag         = TagSize;
 
-                byte[] pt = plaintext;
-                if (offset != 0 || length != plaintext.Length)
+                // Pin the caller's arrays only for the duration of the call.
+                // A GCHandle pair costs tens of nanoseconds — far cheaper than
+                // the per-packet plaintext copy + output copy it replaces.
+                GCHandle inPin  = GCHandle.Alloc(plaintext, GCHandleType.Pinned);
+                GCHandle outPin = GCHandle.Alloc(outBuf,    GCHandleType.Pinned);
+                try
                 {
-                    pt = new byte[length];
-                    Array.Copy(plaintext, offset, pt, 0, length);
+                    IntPtr inPtr  = IntPtr.Add(inPin.AddrOfPinnedObject(),  offset);
+                    IntPtr outPtr = IntPtr.Add(outPin.AddrOfPinnedObject(), outOff);
+                    uint cbResult;
+                    int status = BCryptEncryptPtr(_key, inPtr, (uint)length, ref authInfo,
+                        IntPtr.Zero, 0, outPtr, (uint)length, out cbResult, 0);
+                    if (status != 0)
+                        throw new Exception("BCryptEncrypt failed: 0x" + status.ToString("X8"));
+                }
+                finally
+                {
+                    inPin.Free();
+                    outPin.Free();
                 }
 
-                uint cbResult;
-                int status = BCryptEncrypt(_key, pt, (uint)length, ref authInfo,
-                    IntPtr.Zero, 0, _encryptBuf, (uint)length, out cbResult, 0);
-                if (status != 0)
-                    throw new Exception("BCryptEncrypt failed: 0x" + status.ToString("X8"));
-
-                // Return a correctly-sized copy: ciphertext || tag.
-                output = new byte[needed];
-                Array.Copy(_encryptBuf, 0, output, 0, length);
-                Array.Copy(_tagBuffer, 0, output, length, TagSize);
+                Array.Copy(_tagBuffer, 0, outBuf, outOff + length, TagSize);
             }
+        }
+
+        /// <summary>
+        /// Encrypt plaintext[offset..offset+length] with the given 12-byte nonce.
+        /// Returns a new byte[] containing ciphertext || 16-byte tag. Allocating
+        /// wrapper over EncryptInto.
+        /// </summary>
+        public byte[] Encrypt(byte[] plaintext, int offset, int length, byte[] nonce12)
+        {
+            byte[] output = new byte[length + TagSize];
+            EncryptInto(plaintext, offset, length, nonce12, output, 0);
             return output;
         }
 
         /// <summary>
-        /// Decrypt msg[Tr_Payload..] which is ciphertext || 16-byte tag.
-        /// Returns plaintext, or null if the tag is invalid (wrong key/nonce/tampered).
+        /// Decrypt input[inOff..inOff+inLen) (ciphertext || 16-byte tag) into
+        /// outBuf[outOff..] (inLen - 16 bytes written). Returns false if the tag
+        /// is invalid. The caller's arrays are pinned for the duration of the
+        /// bcrypt call so no intermediate copies are made.
         /// </summary>
-        /// <summary>
-        /// Decrypt ciphertextAndTag[0..length] (ciphertext || 16-byte tag).
-        /// Returns plaintext, or null if the tag is invalid.
-        /// </summary>
-        public byte[] Decrypt(byte[] ciphertextAndTag, int length, byte[] nonce12)
+        public bool DecryptInto(byte[] input, int inOff, int inLen, byte[] nonce12,
+                                byte[] outBuf, int outOff)
         {
             if (_disposed) throw new ObjectDisposedException("CngChaCha20Poly1305");
-            if (length < TagSize) return null;
-
-            int ctLen = length - TagSize;
-            byte[] ct = new byte[ctLen];
-            Array.Copy(ciphertextAndTag, 0, ct, 0, ctLen);
-            byte[] pt = new byte[ctLen];
+            if (inLen < TagSize) return false;
+            int ctLen = inLen - TagSize;
+            if (outBuf.Length - outOff < ctLen)
+                throw new ArgumentException("Output buffer too small.");
 
             lock (_lock)
             {
                 Array.Copy(nonce12, _nonceBuffer, NonceSize);
-                Array.Copy(ciphertextAndTag, ctLen, _tagBuffer, 0, TagSize);
+                Array.Copy(input, inOff + ctLen, _tagBuffer, 0, TagSize);
 
                 var authInfo = new BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO();
                 authInfo.cbSize        = (uint)Marshal.SizeOf(authInfo);
                 authInfo.dwInfoVersion = BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO_VERSION;
                 authInfo.pbNonce       = _noncePin.AddrOfPinnedObject();
-                authInfo.cbNonce       = NonceSize;
+                authInfo.cbNonce      = NonceSize;
                 authInfo.pbTag         = _tagPin.AddrOfPinnedObject();
                 authInfo.cbTag         = TagSize;
 
-                uint cbResult;
-                int status = BCryptDecrypt(_key, ct, (uint)ctLen, ref authInfo,
-                    IntPtr.Zero, 0, pt, (uint)ctLen, out cbResult, 0);
-                if (status != 0) return null;
+                GCHandle inPin  = GCHandle.Alloc(input,  GCHandleType.Pinned);
+                GCHandle outPin = GCHandle.Alloc(outBuf, GCHandleType.Pinned);
+                try
+                {
+                    IntPtr inPtr  = IntPtr.Add(inPin.AddrOfPinnedObject(),  inOff);
+                    IntPtr outPtr = IntPtr.Add(outPin.AddrOfPinnedObject(), outOff);
+                    uint cbResult;
+                    int status = BCryptDecryptPtr(_key, inPtr, (uint)ctLen, ref authInfo,
+                        IntPtr.Zero, 0, outPtr, (uint)ctLen, out cbResult, 0);
+                    if (status != 0) return false;
+                }
+                finally
+                {
+                    inPin.Free();
+                    outPin.Free();
+                }
             }
+            return true;
+        }
+
+        /// <summary>
+        /// Decrypt ciphertextAndTag[0..length] (ciphertext || 16-byte tag).
+        /// Returns plaintext, or null if the tag is invalid. Allocating wrapper
+        /// over DecryptInto.
+        /// </summary>
+        public byte[] Decrypt(byte[] ciphertextAndTag, int length, byte[] nonce12)
+        {
+            if (length < TagSize) return null;
+            byte[] pt = new byte[length - TagSize];
+            if (!DecryptInto(ciphertextAndTag, 0, length, nonce12, pt, 0)) return null;
             return pt;
         }
 

@@ -71,6 +71,29 @@ namespace WgSharp
                 return;
             }
 
+            // One-time elevated setup (launched via a "runas" self-start from
+            // the unelevated GUI, or manually): registers + starts the
+            // background manager service and pre-authorizes the firewall,
+            // then exits. Runs BEFORE the single-instance mutex on purpose —
+            // the GUI that spawned it is holding that mutex and waiting for
+            // this process's exit code.
+            if (args.Length > 0 && string.Equals(args[0], "--elevated-setup", StringComparison.OrdinalIgnoreCase))
+            {
+                WgSharp.Core.AppSettings.Load();
+                Environment.ExitCode = WgSharp.Core.ElevatedSetup.Run();
+                return;
+            }
+
+            // Counterpart to --elevated-setup, used by the Settings checkbox
+            // when the (unelevated) GUI is asked to remove the background
+            // service: stop and unregister it, then exit.
+            if (args.Length > 0 && string.Equals(args[0], "--elevated-uninstall-service", StringComparison.OrdinalIgnoreCase))
+            {
+                try { WgSharp.Core.ServiceInstaller.Uninstall(); Environment.ExitCode = 0; }
+                catch { Environment.ExitCode = 1; }
+                return;
+            }
+
             if (IsArchitectureMismatch())
             {
                 MessageBox.Show(

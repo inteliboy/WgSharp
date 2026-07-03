@@ -7,21 +7,43 @@ namespace WgSharp.Net
     /// <summary>
     /// UDP transport to a single peer endpoint. WireGuard multiplexes handshake
     /// and transport messages over one socket, demuxed by the first byte.
+    ///
+    /// PERFORMANCE NOTES:
+    ///   - Built on a raw Socket rather than UdpClient. UdpClient.Receive
+    ///     allocates a fresh byte[] for every datagram with no way around it;
+    ///     Socket.ReceiveFrom fills a caller-supplied buffer, so the inbound
+    ///     loop can run a single reusable buffer (see the int-returning
+    ///     ReceiveFrom overload). The old allocating overloads remain as
+    ///     wrappers for cold-path callers.
+    ///   - SO_RCVBUF / SO_SNDBUF are raised well above the OS default. Default
+    ///     UDP socket buffers (often 64KB) silently drop datagrams under bulk
+    ///     transfer; on a VPN that surfaces as throughput collapse and
+    ///     retransmission storms rather than an obvious error. Set generously —
+    ///     the memory is only committed as used.
     /// </summary>
     public sealed class UdpTransport : IDisposable
     {
-        private readonly UdpClient _client;
+        private readonly Socket _sock;
         private IPEndPoint _peer;
         private readonly string _endpointSpec;   // original "host:port" for re-resolution
+        private EndPoint _recvEp = new IPEndPoint(IPAddress.Any, 0); // ref target for ReceiveFrom
+
+        private const int ReceiveBufferBytes = 4 * 1024 * 1024;
+        private const int SendBufferBytes = 1 * 1024 * 1024;
 
         public UdpTransport(string endpoint, int localPort)
         {
             _endpointSpec = endpoint;
             _peer = Resolve(endpoint);
             // Bind to the requested local port (0 = ephemeral). Dual-stack off; IPv4 path.
-            _client = new UdpClient(new IPEndPoint(IPAddress.Any, localPort));
+            _sock = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp);
+            _sock.Bind(new IPEndPoint(IPAddress.Any, localPort));
             // Modest receive timeout so the inbound loop can poll _running.
-            _client.Client.ReceiveTimeout = 250;
+            _sock.ReceiveTimeout = 250;
+            // Large kernel buffers to survive bursts (best effort; some systems
+            // clamp these, which is fine).
+            try { _sock.ReceiveBufferSize = ReceiveBufferBytes; } catch { }
+            try { _sock.SendBufferSize = SendBufferBytes; } catch { }
         }
 
         public IPEndPoint PeerEndpoint { get { return _peer; } }
@@ -69,39 +91,61 @@ namespace WgSharp.Net
 
         public void Send(byte[] data, int length)
         {
-            _client.Send(data, length, _peer);
+            _sock.SendTo(data, length, SocketFlags.None, _peer);
         }
 
         /// <summary>Send to a specific peer endpoint (multi-peer).</summary>
         public void SendTo(byte[] data, int length, IPEndPoint endpoint)
         {
-            _client.Send(data, length, endpoint);
+            _sock.SendTo(data, length, SocketFlags.None, endpoint);
         }
 
         /// <summary>
-        /// Receive one datagram and report its source endpoint (for index-based
-        /// peer demux and basic roaming). Returns null on timeout.
+        /// Receive one datagram into a caller-supplied buffer and report its
+        /// source endpoint. Returns the datagram length, or -1 on timeout /
+        /// shutdown (so the caller can re-check its running flag). This is the
+        /// allocation-free hot-path receive: the same buffer can be reused for
+        /// every datagram, because the inbound loop fully consumes each one
+        /// before the next call.
         /// </summary>
-        public byte[] ReceiveFrom(out IPEndPoint from)
+        public int ReceiveFrom(byte[] buffer, out IPEndPoint from)
         {
             from = null;
             try
             {
-                IPEndPoint f = new IPEndPoint(IPAddress.Any, 0);
-                byte[] data = _client.Receive(ref f);
-                from = f;
-                return data;
+                // Socket.ReceiveFrom replaces the ref EndPoint with a NEW
+                // IPEndPoint instance built from the packet's source address,
+                // so handing 'from' out (and storing it for roaming) is safe —
+                // subsequent calls do not mutate previously returned instances.
+                int n = _sock.ReceiveFrom(buffer, 0, buffer.Length, SocketFlags.None, ref _recvEp);
+                from = _recvEp as IPEndPoint;
+                return n;
             }
             catch (SocketException ex)
             {
-                if (ex.SocketErrorCode == SocketError.TimedOut) return null;
-                if (ex.SocketErrorCode == SocketError.Interrupted) return null;
+                if (ex.SocketErrorCode == SocketError.TimedOut) return -1;
+                if (ex.SocketErrorCode == SocketError.Interrupted) return -1;
+                if (ex.SocketErrorCode == SocketError.ConnectionReset) return -1; // ICMP port-unreachable echo; ignore
                 throw;
             }
             catch (ObjectDisposedException)
             {
-                return null;
+                return -1;
             }
+        }
+
+        /// <summary>
+        /// Receive one datagram and report its source endpoint (allocating
+        /// wrapper over the buffer overload). Returns null on timeout.
+        /// </summary>
+        public byte[] ReceiveFrom(out IPEndPoint from)
+        {
+            byte[] buf = new byte[65536];
+            int n = ReceiveFrom(buf, out from);
+            if (n < 0) return null;
+            byte[] exact = new byte[n];
+            Array.Copy(buf, exact, n);
+            return exact;
         }
 
         /// <summary>Resolve a peer endpoint spec to an IPEndPoint (static helper).</summary>
@@ -111,33 +155,17 @@ namespace WgSharp.Net
         }
 
         /// <summary>
-        /// Receive one datagram. Returns null on timeout (so the caller can re-check
-        /// its running flag). Updates the peer endpoint on receipt to allow basic
-        /// roaming when the source matches an expected address.
+        /// Receive one datagram (allocating wrapper). Returns null on timeout.
         /// </summary>
         public byte[] Receive()
         {
-            try
-            {
-                IPEndPoint from = new IPEndPoint(IPAddress.Any, 0);
-                byte[] data = _client.Receive(ref from);
-                return data;
-            }
-            catch (SocketException ex)
-            {
-                if (ex.SocketErrorCode == SocketError.TimedOut) return null;
-                if (ex.SocketErrorCode == SocketError.Interrupted) return null;
-                throw;
-            }
-            catch (ObjectDisposedException)
-            {
-                return null; // socket closed during shutdown
-            }
+            IPEndPoint from;
+            return ReceiveFrom(out from);
         }
 
         public void Dispose()
         {
-            try { _client.Close(); } catch { }
+            try { _sock.Close(); } catch { }
         }
     }
 }

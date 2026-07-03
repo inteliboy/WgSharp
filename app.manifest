@@ -4,8 +4,17 @@
   <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
     <security>
       <requestedPrivileges>
-        <!-- Wintun adapter creation and route table edits need admin. -->
-        <requestedExecutionLevel level="requireAdministrator" uiAccess="false"/>
+        <!-- asInvoker: the GUI runs UNELEVATED, so launching WgSharp shows no
+             UAC prompt. All privileged work (adapter/driver, routes, DNS,
+             firewall) happens in the WgSharpSvc background service
+             (LocalSystem), which the GUI drives over a named pipe whose
+             control commands are restricted to members of the Administrators
+             group (checked against the client's LINKED token, so an
+             unelevated admin passes without a prompt; see PipeClientAuth).
+             The only elevation left is a ONE-TIME "runas" self-launch with
+             the elevated-setup switch to register/start the service (plus
+             firewall pre-authorization) on first use. -->
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
       </requestedPrivileges>
     </security>
   </trustInfo>

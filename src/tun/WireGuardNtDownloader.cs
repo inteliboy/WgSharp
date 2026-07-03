@@ -155,9 +155,20 @@ namespace WgSharp.Tun
 
         private const uint WTD_UI_NONE = 2;
         private const uint WTD_REVOKE_NONE = 0;
+        private const uint WTD_REVOKE_WHOLECHAIN = 1;   // check revocation for the entire chain
         private const uint WTD_CHOICE_FILE = 1;
         private const uint WTD_STATEACTION_VERIFY = 1;
         private const uint WTD_STATEACTION_CLOSE = 2;
+
+        // Revocation results that mean "the chain is otherwise valid but the
+        // revocation status could not be determined" — typically an offline
+        // machine or an unreachable OCSP/CRL endpoint. We accept these (the
+        // signature and trust chain still verified) rather than hard-failing an
+        // install behind a captive portal. A *definitive* revocation returns a
+        // different code (CERT_E_REVOKED, 0x800B010C) and is rejected below.
+        private const uint CERT_E_REVOCATION_FAILURE = 0x800B010E; // unable to check
+        private const uint CRYPT_E_REVOCATION_OFFLINE = 0x80092013; // server offline
+        private const uint CRYPT_E_NO_REVOCATION_CHECK = 0x80092012; // no revocation performed
 
         [StructLayout(LayoutKind.Sequential)]
         private struct WINTRUST_FILE_INFO
@@ -209,7 +220,7 @@ namespace WgSharp.Tun
                 {
                     cbStruct = (uint)Marshal.SizeOf(typeof(WINTRUST_DATA)),
                     dwUIChoice = WTD_UI_NONE,
-                    fdwRevocationChecks = WTD_REVOKE_NONE,
+                    fdwRevocationChecks = WTD_REVOKE_WHOLECHAIN,
                     dwUnionChoice = WTD_CHOICE_FILE,
                     pFile = pFile,
                     dwStateAction = WTD_STATEACTION_VERIFY
@@ -228,26 +239,93 @@ namespace WgSharp.Tun
                     WinVerifyTrust(IntPtr.Zero, ref action, pData);
 
                     if (result != 0)
-                        throw new Exception("wireguard.dll Authenticode signature is invalid or untrusted " +
-                                            "(WinVerifyTrust 0x" + result.ToString("X8") + ").");
+                    {
+                        if (result == CERT_E_REVOCATION_FAILURE ||
+                            result == CRYPT_E_REVOCATION_OFFLINE ||
+                            result == CRYPT_E_NO_REVOCATION_CHECK)
+                        {
+                            // Chain and signature verified; only the revocation
+                            // status was indeterminate (offline / unreachable
+                            // CRL/OCSP). Accept, but say so — a revoked cert
+                            // returns CERT_E_REVOKED and is NOT swallowed here.
+                            L(Logger.DebugMarker + "wireguard.dll signature valid; revocation status " +
+                              "could not be checked (offline?) — 0x" + result.ToString("X8") + ".");
+                        }
+                        else
+                        {
+                            throw new Exception("wireguard.dll Authenticode signature is invalid, untrusted, " +
+                                                "or revoked (WinVerifyTrust 0x" + result.ToString("X8") + ").");
+                        }
+                    }
                 }
                 finally { Marshal.FreeHGlobal(pData); }
             }
             finally { Marshal.FreeHGlobal(pFile); }
 
-            // 2) Publisher check: the signing cert subject must name WireGuard.
+            // 2) Publisher check: the signing cert's Organization (O=) must be
+            // exactly "WireGuard LLC". This is deliberately stricter than a bare
+            // substring search for "WireGuard" anywhere in the DN: a substring
+            // test would accept a cert whose CN/OU merely *contained* the word
+            // (e.g. "Not WireGuard Inc"), as long as it chained to a trusted
+            // root. Matching the O relative-distinguished-name to the known
+            // signer name is the meaningful publisher assertion.
+            string subject = null;
             try
             {
                 var cert = X509Certificate.CreateFromSignedFile(filePath);
-                string subject = cert.Subject ?? "";
-                if (subject.IndexOf("WireGuard", StringComparison.OrdinalIgnoreCase) < 0)
-                    throw new Exception("wireguard.dll is signed, but not by WireGuard LLC (subject: " +
-                                        subject + ").");
+                subject = cert.Subject ?? "";
             }
             catch (Exception ex)
             {
                 throw new Exception("Could not confirm wireguard.dll's signing publisher: " + ex.Message);
             }
+
+            string org = ExtractRdn(subject, "O");
+            if (!string.Equals(org, "WireGuard LLC", StringComparison.OrdinalIgnoreCase))
+                throw new Exception("wireguard.dll is signed, but not by WireGuard LLC (cert subject: " +
+                                    subject + ").");
+        }
+
+        /// <summary>
+        /// Extracts a single relative-distinguished-name value (e.g. the "O"
+        /// organization field) from an X.500 subject/issuer string as produced
+        /// by X509Certificate.Subject. Handles the common
+        /// "CN=..., O=WireGuard LLC, L=..., C=US" form, optional spaces after
+        /// commas, and double-quoted values that themselves contain commas.
+        /// Returns null if the RDN isn't present.
+        /// </summary>
+        private static string ExtractRdn(string dn, string rdn)
+        {
+            if (string.IsNullOrEmpty(dn)) return null;
+            int i = 0;
+            int n = dn.Length;
+            while (i < n)
+            {
+                // Read the attribute type up to '='.
+                int eq = dn.IndexOf('=', i);
+                if (eq < 0) break;
+                string type = dn.Substring(i, eq - i).Trim();
+                int v = eq + 1;
+
+                string value;
+                if (v < n && dn[v] == '"')
+                {
+                    // Quoted value: read to the closing quote.
+                    int end = dn.IndexOf('"', v + 1);
+                    if (end < 0) { value = dn.Substring(v + 1); i = n; }
+                    else { value = dn.Substring(v + 1, end - v - 1); i = end + 1; while (i < n && dn[i] != ',') i++; if (i < n) i++; }
+                }
+                else
+                {
+                    int comma = dn.IndexOf(',', v);
+                    if (comma < 0) { value = dn.Substring(v); i = n; }
+                    else { value = dn.Substring(v, comma - v); i = comma + 1; }
+                }
+
+                if (string.Equals(type, rdn, StringComparison.OrdinalIgnoreCase))
+                    return value.Trim();
+            }
+            return null;
         }
     }
 }

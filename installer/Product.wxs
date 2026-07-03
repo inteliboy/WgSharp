@@ -23,6 +23,11 @@
     - LICENSE and README.md alongside it
     - A Start Menu shortcut (with an Uninstall entry alongside it)
     - Standard Add/Remove Programs registration
+    - Registers the WgSharpSvc background service (LocalSystem, auto-start)
+      at install time, so the unelevated GUI never has to prompt for
+      elevation just to set it up. It is registered but not started here;
+      the service idles until a tunnel is activated (or reconnects one at
+      boot from its own persisted state).
     - Closes a running WgSharp automatically before touching its files —
       BOTH the GUI (util:CloseApplication, with a guaranteed TerminateProcess
       fallback) and the background service (ServiceControl, since it's the
@@ -30,13 +35,16 @@
       element for the full explanation.
 
   What this deliberately does NOT do:
-    - Install/start the background service, or touch the Windows Firewall, or
-      enable login autostart; those are WgSharp's OWN first-run behavior
-      (see src/core/InstallLocation.cs): when WgSharp detects it's running
-      from this exact installed path, it enables autostart + the service by
-      default and disallows turning on Portable mode, entirely on its own at
-      first run. The installer's job is just to put the exe on disk;
-      everything else happens the first time the app itself starts.
+    - Start the service, touch the Windows Firewall, or enable login
+      autostart. Firewall pre-authorization and autostart remain WgSharp's
+      OWN first-run behavior (see src/core/InstallLocation.cs): when WgSharp
+      detects it's running from this exact installed path, it enables
+      autostart by default and disallows turning on Portable mode, on its
+      own at first run. (Service REGISTRATION used to be part of that
+      first-run behavior too, gated behind a one-time elevation prompt;
+      it now happens here in the installer instead, so MSI users get no
+      prompt at all. The app-side path stays as a fallback for non-MSI
+      installed layouts.)
 -->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi"
      xmlns:util="http://schemas.microsoft.com/wix/UtilExtension">
@@ -121,9 +129,11 @@
              CloseReason.WindowsShutDown — a reason MainForm.OnFormClosing
              already treats as "really exit" (it only special-cases
              UserClosing), with no custom code required on our side.
-             ElevatedCloseMessage="yes" is required because WgSharp's
-             manifest forces it to run elevated, so a plain close request
-             wouldn't reach it.
+             ElevatedCloseMessage="yes" is kept as belt-and-suspenders: the
+             GUI now runs unelevated (asInvoker), so the ordinary close
+             message already reaches it, but leaving this on also covers a
+             manually elevated ("Run as administrator") instance, whose
+             window would otherwise be above a non-elevated close broadcast.
 
              TerminateProcess="1" with a short Timeout is the actual
              guarantee, not just a nicety: if the graceful attempts above
@@ -161,6 +171,36 @@
     <DirectoryRef Id="INSTALLFOLDER">
       <Component Id="MainExecutable" Guid="*" Win64="yes">
         <File Id="WgSharpExe" Source="$(var.SourceDir)\WgSharp.exe" KeyPath="yes" />
+        <!-- Register the background service AT INSTALL TIME. The installer is
+             already elevated, so doing it here means the service exists the
+             moment the (unelevated, asInvoker) GUI first launches — no
+             first-run UAC prompt to set it up. This mirrors exactly what
+             src/core/ServiceInstaller.cs registers for a non-MSI install:
+               name        WgSharpSvc
+               account     LocalSystem
+               start       auto (always-on manager; idle until a tunnel is up)
+               image path  the exe path followed by the service-mode argument
+                           (the Arguments attribute below appends it after the
+                           File's own path, and Program.cs keys on it to run as
+                           the service instead of the GUI)
+             ErrorControl="normal" so a service-registration hiccup doesn't
+             abort the whole install. The service is only REGISTERED here, not
+             started: there's no Start= on install, matching the manager's
+             "idle until you connect" behavior and leaving the boot-reconnect
+             decision to the service's own persisted last-tunnel state. The
+             GUI's EnsureBackgroundServiceReady stays as a fallback for
+             installed copies that somehow lack the service (e.g. it was
+             manually removed), and for the non-MSI installed layout. -->
+        <ServiceInstall Id="InstallWgSharpService"
+                        Name="WgSharpSvc"
+                        DisplayName="WgSharp Tunnel Service"
+                        Description="Runs WgSharp WireGuard tunnels and reconnects them before login."
+                        Type="ownProcess"
+                        Start="auto"
+                        Account="LocalSystem"
+                        ErrorControl="normal"
+                        Arguments=" --service"
+                        Vital="no" />
         <!-- Deterministically stops the background service (service name
              "WgSharpSvc", see src/core/ServiceInstaller.cs) before files
              are replaced, on BOTH install and uninstall. This is a core MSI
@@ -181,9 +221,13 @@
              exe is genuinely unlocked by the time it's written regardless of
              what Restart Manager did or didn't manage on its own.
              Remove="uninstall" also deletes the service registration when
-             WgSharp itself is uninstalled, so nothing's left orphaned. -->
+             WgSharp itself is uninstalled, so nothing's left orphaned. Note
+             this complements the ServiceInstall above: ServiceInstall is what
+             REGISTERS it, ServiceControl is what stops (and, on uninstall,
+             removes) it. -->
         <ServiceControl Id="StopWgSharpService"
                         Name="WgSharpSvc"
+                        Start="install"
                         Stop="both"
                         Remove="uninstall"
                         Wait="yes" />

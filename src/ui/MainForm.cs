@@ -133,41 +133,66 @@ namespace WgSharp.Ui
             TryParseConfig();
             BuildDetail();
 
-            // Pre-authorize this exe with Windows Firewall so the interactive
-            // "allow this app" consent dialog never needs to fire (we're already
-            // elevated, so this is silent). Synchronous: it's two quick netsh
-            // calls, and must complete before the user could possibly connect.
-            WgSharp.Tun.FirewallSelfRegister.Log += Log;
-            WgSharp.Tun.FirewallSelfRegister.EnsureRulesForCurrentExe();
-
-            // If the background service is installed but registered against
-            // a different binPath than this exe's own (e.g. an earlier
-            // extraction folder, or a version from before the --service
-            // argument existed), fix and restart it now — before anything
-            // else talks to it (the tray menu pre-warm and the "is a tunnel
-            // already running" check both happen via Load, right after the
-            // constructor finishes). Synchronous, same reasoning as the
-            // firewall registration above: a couple of quick sc.exe calls.
-            try
-            {
-                if (WgSharp.Core.ServiceInstaller.RefreshIfStale())
-                    Log("Background service registration was stale; reinstalled and restarted it.");
-            }
-            catch (Exception ex) { Log("Background service refresh check failed: " + ex.Message); }
-
-            // Same self-heal for the login-autostart entry: if it's enabled but
-            // points at an old exe path (app moved folders), re-point it.
-            try { WgSharp.Core.LoginAutostart.RefreshIfStale(); }
-            catch (Exception ex) { Log(Logger.DebugMarker + "Login-autostart refresh check failed: " + ex.Message); }
-
-            // Fetch native drivers (wintun.dll always; wireguard.dll for the
-            // WireGuardNT backend) at startup, in the background.
-            WgSharp.Tun.DriverBootstrap.Log += Log;
             // Route kill-switch logging to the Log tab once (both backends share the
             // static KillSwitch.Log event; subscribing here avoids duplicate hooks
             // from per-connect tunnel instances).
             WgSharp.Tun.KillSwitch.Log += Log;
-            WgSharp.Tun.DriverBootstrap.EnsureDriversAsync();
+
+            if (WgSharp.Core.Elevation.IsProcessElevated())
+            {
+                // Elevated launch (manual "Run as administrator", or a machine
+                // with UAC off): perform the privileged self-maintenance
+                // directly, as older versions always did.
+
+                // Pre-authorize this exe with Windows Firewall so the interactive
+                // "allow this app" consent dialog never needs to fire.
+                // Synchronous: two quick netsh calls.
+                WgSharp.Tun.FirewallSelfRegister.Log += Log;
+                WgSharp.Tun.FirewallSelfRegister.EnsureRulesForCurrentExe();
+
+                // If the background service is registered against a different
+                // binPath than this exe's own (e.g. an earlier extraction
+                // folder), fix and restart it now — before anything else talks
+                // to it.
+                try
+                {
+                    if (WgSharp.Core.ServiceInstaller.RefreshIfStale())
+                        Log("Background service registration was stale; reinstalled and restarted it.");
+                }
+                catch (Exception ex) { Log("Background service refresh check failed: " + ex.Message); }
+
+                // Fetch native drivers (wintun.dll always; wireguard.dll for
+                // the WireGuardNT backend) at startup, in the background.
+                WgSharp.Tun.DriverBootstrap.Log += Log;
+                WgSharp.Tun.DriverBootstrap.EnsureDriversAsync();
+            }
+            else
+            {
+                // Normal asInvoker launch: no UAC prompt happened, so this
+                // process can't do the privileged self-maintenance itself.
+                // The background service owns all of it now (including driver
+                // bootstrap, which it runs in its own OnStart as LocalSystem).
+                // Firewall pre-authorization was done by the one-time setup.
+                // All that's needed here is making sure that service exists
+                // and is running — offering the one-time elevated setup if not.
+                //
+                // This must NOT run inside the constructor: it can show a
+                // modal MessageBox, and a modal dialog owned by this form
+                // forces the window handle to be created and pumps the message
+                // loop while open. That would fire OnHandleCreated ->
+                // RunDeferredStartupWork -> a BeginInvoke'd OnTrayMenuOpening
+                // that dereferences _trayMenu and other fields not yet
+                // assigned this far down the constructor (NRE). So just flag
+                // it; RunDeferredStartupWork runs the offer once the form is
+                // fully constructed and its message loop is running normally.
+                _needServiceSetupOffer = true;
+            }
+
+            // Self-heal for the login-autostart entry: if it's enabled but
+            // points at an old exe path (app moved folders), re-point it.
+            // (HKCU — needs no elevation.)
+            try { WgSharp.Core.LoginAutostart.RefreshIfStale(); }
+            catch (Exception ex) { Log(Logger.DebugMarker + "Login-autostart refresh check failed: " + ex.Message); }
 
             // Tray icon context menu: status header, quick-connect profile
             // list, then Status/About/Exit — see OnTrayMenuOpening, which
@@ -196,6 +221,7 @@ namespace WgSharp.Ui
         }
 
         private bool _startupWorkDone;
+        private bool _needServiceSetupOffer;   // set in ctor (asInvoker, service not confirmed); acted on in RunDeferredStartupWork
 
         // Called from OnHandleCreated (see MainForm.SystemMenu.cs, which
         // already overrides it for the system-menu "About" item — a class can
@@ -212,6 +238,34 @@ namespace WgSharp.Ui
                 OnTrayMenuOpening(this, null);   // pre-warm the tray menu path
                 CheckForRunningServiceTunnel();  // detect a service tunnel + start the log pump
                 MaybeAutoReconnect();            // reconnect if upgraded/restarted while connected
+
+                // Offer the one-time elevated setup if the constructor flagged
+                // that we're unelevated and the manager service wasn't
+                // confirmed running. Done here — after the form is fully built
+                // and detection above has already run — so the modal prompt
+                // can't reorder startup or touch half-initialized fields. If a
+                // service tunnel was actually detected just above, the service
+                // is obviously present, so skip the offer entirely.
+                //
+                // Two distinct unelevated situations, and they're mutually
+                // exclusive (EnforcePortableModeRestriction guarantees portable
+                // mode is off whenever we're installed to Program Files):
+                //   * Portable mode: there is NO service by design. The app
+                //     needs to run elevated to create the adapter itself, so we
+                //     just tell the user to relaunch as administrator and stay
+                //     up read-only until they do (NotifyPortableNeedsElevation).
+                //   * Installed/service mode: offer the one-time service setup.
+                if (_needServiceSetupOffer)
+                {
+                    _needServiceSetupOffer = false;
+                    if (!_active)
+                    {
+                        if (AppSettings.PortableMode)
+                            NotifyPortableNeedsElevation();
+                        else
+                            EnsureBackgroundServiceReady(false); // startup: never auto-launch a UAC prompt
+                    }
+                }
             }));
         }
 
@@ -330,6 +384,166 @@ namespace WgSharp.Ui
         // PumpServiceLog), so we don't prepend a second timestamp the way Log
         // does. Verbosity is already filtered service-side, so these are shown
         // as-is.
+        // One-time setup gate for the unelevated GUI. If the manager service
+        // is already reachable, does nothing. Otherwise explains the single
+        // UAC prompt, runs "--elevated-setup" via runas, and reports the
+        // outcome in the Log tab. Declining is respected (and remembered only
+        // for this run — the offer naturally recurs next launch or on the
+        // next activation attempt, because nothing works without the service).
+        private bool _setupOffered;
+        // True when running in portable mode WITHOUT elevation. Portable mode
+        // has no background service (by design — a portable copy shouldn't
+        // register anything with the machine), so the app must be elevated to
+        // create the adapter itself. When it isn't, the GUI stays up in a
+        // read-only state: everything is browsable, but Activate is disabled
+        // with a tooltip pointing the user at "Run as administrator." Flips to
+        // false only by relaunching elevated.
+        private bool _portableReadOnly;
+
+        // Shows the one-time "please relaunch as administrator" notice for an
+        // unelevated portable launch, then puts the UI into read-only mode.
+        // Non-fatal and non-blocking beyond the single dialog: the user can
+        // keep looking around, import/edit tunnels, and relaunch elevated when
+        // they actually want to connect.
+        private void NotifyPortableNeedsElevation()
+        {
+            _portableReadOnly = true;
+            RefreshActivateEnabled();
+
+            MessageBox.Show(this,
+                "WgSharp is running in portable mode, which needs administrator rights to create the " +
+                "VPN adapter — and, by design, portable mode installs no background service.\r\n\r\n" +
+                "You can browse and edit tunnels now, but to CONNECT you'll need to relaunch WgSharp " +
+                "elevated:\r\n\r\n" +
+                "    Close WgSharp, then right-click WgSharp.exe and choose \"Run as administrator.\"\r\n\r\n" +
+                "(Installing WgSharp normally avoids this — the installed version runs without a prompt " +
+                "and sets up its background service once.)",
+                "WgSharp \u2014 portable mode",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+            Log("Portable mode without elevation: connecting is disabled until WgSharp is relaunched " +
+                "as administrator (right-click \u2192 Run as administrator).");
+        }
+
+        // Enables/disables the Activate button for the current state. In the
+        // portable-read-only case it's disabled with an explanatory tooltip;
+        // otherwise it follows the normal busy/selection rules (the button's
+        // own click path re-checks _busy, so this is just the visible hint).
+        private void RefreshActivateEnabled()
+        {
+            if (btnActivate == null) return;
+            if (_portableReadOnly)
+            {
+                btnActivate.Enabled = false;
+                _activateTip.SetToolTip(btnActivate,
+                    "Portable mode needs administrator rights to connect.\r\n" +
+                    "Relaunch WgSharp with right-click \u2192 Run as administrator.");
+            }
+            else
+            {
+                btnActivate.Enabled = true;
+                _activateTip.SetToolTip(btnActivate, "");
+            }
+        }
+
+        private readonly ToolTip _activateTip = new ToolTip();
+
+        private void EnsureBackgroundServiceReady() { EnsureBackgroundServiceReady(true); }
+
+        // allowElevation=false (startup): try only non-elevated actions and
+        // never launch a UAC prompt on its own — a quiet launch must stay
+        // quiet even if the service happens to be stopped (it auto-starts at
+        // boot anyway, and clicking Activate will start it on demand).
+        // allowElevation=true (an explicit Activate): may run the one-time
+        // elevated setup to register and/or start the service.
+        private void EnsureBackgroundServiceReady(bool allowElevation)
+        {
+            try
+            {
+                if (ServiceClient.IsServiceRunning()) return;
+                if (_setupOffered) return;
+                _setupOffered = true;
+
+                // If the service is already REGISTERED (the normal case now —
+                // the MSI registers and starts it at install time), it just
+                // needs to be running. Try to start it directly; a standard
+                // user usually can't (SERVICE_START is denied), so if that
+                // fails, fall through to the one-time elevated setup, which
+                // starts it as part of its work. No Yes/No prompt either way.
+                if (WgSharp.Core.ServiceInstaller.IsInstalled())
+                {
+                    try
+                    {
+                        WgSharp.Core.ServiceInstaller.StartTunnelService();
+                        if (ServiceClient.IsServiceRunning())
+                        {
+                            Log(WgSharp.Core.Logger.DebugMarker + "Background service started.");
+                            return;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log(WgSharp.Core.Logger.DebugMarker +
+                            "Couldn't start the background service directly (" + ex.Message + ").");
+                    }
+                    if (!allowElevation)
+                    {
+                        // Quiet startup path: don't prompt. Let it be — the
+                        // service auto-starts at boot, and an Activate click
+                        // will bring it up (with a prompt) if still stopped.
+                        _setupOffered = false;
+                        return;
+                    }
+                    // Registered but we couldn't start it unelevated: elevate to
+                    // start it (setup is idempotent — it re-registers no-op and
+                    // starts the existing service).
+                    Log("Starting the WgSharp background service (one-time administrator prompt)\u2026");
+                    string startErr;
+                    if (WgSharp.Core.Elevation.RunElevatedSetup(out startErr))
+                        Log("Background service is " + (ServiceClient.IsServiceRunning() ? "running." : "starting."));
+                    else
+                    {
+                        Log(startErr == "cancelled"
+                            ? "Cancelled at the UAC prompt; the service will also start on its own at the next reboot."
+                            : "Couldn't start the service: " + startErr + ".");
+                        _setupOffered = false;
+                    }
+                    return;
+                }
+
+                // Not registered at all. This is the non-MSI installed layout
+                // (or the service was manually removed). Registering needs
+                // elevation, which this asInvoker GUI doesn't have.
+                if (!allowElevation)
+                {
+                    // Startup: stay quiet. The offer will happen when the user
+                    // actually tries to Activate.
+                    _setupOffered = false;
+                    return;
+                }
+                // On an explicit Activate: go straight to the one UAC prompt.
+                // No redundant Yes/No — the user installed WgSharp, the service
+                // is part of it, and the only consent needed is the elevation
+                // itself, which UAC already asks for.
+                Log("Setting up the WgSharp background service (one-time administrator prompt)\u2026");
+                string err;
+                if (WgSharp.Core.Elevation.RunElevatedSetup(out err))
+                {
+                    Log("One-time setup finished; the background service is " +
+                        (ServiceClient.IsServiceRunning() ? "running." : "registered (waiting for it to come up)."));
+                }
+                else
+                {
+                    Log(err == "cancelled"
+                        ? "Service setup cancelled at the UAC prompt; tunnels can't be activated until it's " +
+                          "set up (this will be offered again on the next activation attempt)."
+                        : "Service setup failed: " + err + " (details in ProgramData\\WgSharp\\setup.log).");
+                    _setupOffered = false;
+                }
+            }
+            catch (Exception ex) { Log("Setup check failed: " + ex.Message); }
+        }
+
         private void LogRaw(string line)
         {
             if (line == null) return;
@@ -801,6 +1015,10 @@ namespace WgSharp.Ui
         {
             bool displayedIsActive = _active && _tunnelName == _activeTunnelName;
             btnActivate.Text = displayedIsActive ? "Deactivate" : "Activate";
+            // Re-apply the portable-read-only disable/tooltip: this runs on
+            // every detail rebuild (tunnel switch), which would otherwise
+            // re-enable the freshly created button.
+            RefreshActivateEnabled();
         }
 
         // Keeps the system tray icon's hover tooltip current with the actually
@@ -846,6 +1064,10 @@ namespace WgSharp.Ui
         // any, is active), then Status/About/Exit.
         private void OnTrayMenuOpening(object sender, System.ComponentModel.CancelEventArgs e)
         {
+            // Defensive: this can be reached via a deferred BeginInvoke during
+            // startup; if the menu field isn't assigned yet there's nothing to
+            // build (and the real Opening event will rebuild it later anyway).
+            if (_trayMenu == null) return;
             _trayMenu.Items.Clear();
 
             bool connected = false;
@@ -971,14 +1193,15 @@ namespace WgSharp.Ui
             //
             // CRITICAL: this must NEVER apply to a RemoteTunnelBackend
             // (service-driven tunnel). RemoteTunnelBackend.Stop() doesn't
-            // just disconnect the GUI — it calls ServiceInstaller.
-            // StopTunnelService() and clears boot-start, genuinely stopping
-            // the background service itself. The entire point of that
-            // service is to keep the tunnel up across GUI exit/logout/reboot;
-            // calling Stop() here on every ordinary window close (including
-            // Windows shutdown, where the service is specifically supposed
-            // to survive and reconnect before the NEXT login) would silently
-            // defeat that. So: only an in-process backend gets stopped here.
+            // just disconnect the GUI — it sends DEACTIVATE to the manager
+            // service, tearing down the tunnel and clearing its boot-
+            // reconnect state. The entire point of that service is to keep
+            // the tunnel up across GUI exit/logout/reboot; calling Stop()
+            // here on every ordinary window close (including Windows
+            // shutdown, where the service is specifically supposed to
+            // survive and reconnect the tunnel before the NEXT login) would
+            // silently defeat that. So: only an in-process backend gets
+            // stopped here.
             //
             // For that in-process case, this deliberately does NOT reuse
             // DeactivateTunnel(): that method is async on purpose (so the
@@ -1016,6 +1239,20 @@ namespace WgSharp.Ui
 
         private void ActivateTunnel(bool skipUnlock)
         {
+            // Portable + unelevated: no service and no rights to build the
+            // adapter. Re-show the guidance instead of failing deep in driver
+            // init, and leave everything else untouched.
+            if (_portableReadOnly)
+            {
+                Log("Can't connect in portable mode without administrator rights \u2014 relaunch WgSharp " +
+                    "with right-click \u2192 Run as administrator.");
+                MessageBox.Show(this,
+                    "Portable mode needs administrator rights to connect.\r\n\r\n" +
+                    "Close WgSharp, then right-click WgSharp.exe and choose \"Run as administrator.\"",
+                    "WgSharp \u2014 administrator required",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
             try
             {
                 // In portable mode the stored config is password-encrypted; unlock
@@ -1138,21 +1375,60 @@ namespace WgSharp.Ui
             string tunnelNameSnapshot = _tunnelName;
             ITunnelBackend tunnel;
 
-            // If the background service is installed, route activation through
-            // it: activating becomes "start the service" (which brings the
-            // tunnel up inside the service, as a LocalSystem process that
-            // survives logout and can reconnect before login). The service is
-            // normally installed-but-stopped when idle, so we check IsInstalled,
-            // NOT IsRunning — starting it from stopped is exactly the activate
-            // action. Modeled on the official client, where activation is an
-            // SCM start of the per-tunnel service. Only non-portable tunnels
-            // qualify; portable configs are password-encrypted and the service
-            // has no human to type the password, so those always run in-process.
-            if (!AppSettings.PortableMode && ServiceInstaller.IsInstalled())
+            // Portable mode is deliberately service-free: a portable copy must
+            // not hand its (decrypted) config to a machine-wide service, and
+            // shouldn't depend on one that may be a leftover from a prior
+            // installed setup. So portable ALWAYS runs in-process, which needs
+            // elevation. _portableReadOnly (set at startup) and the guard in
+            // ActivateTunnel should already have caught the unelevated case;
+            // this is the final backstop. Falls through to the shared start
+            // block below once the backend is chosen.
+            if (AppSettings.PortableMode)
             {
-                Log("Background service installed; activating through it.");
+                if (!WgSharp.Core.Elevation.IsProcessElevated())
+                {
+                    Log("Portable mode can't connect without administrator rights \u2014 relaunch WgSharp " +
+                        "with right-click \u2192 Run as administrator.");
+                    return;
+                }
+                bool forcedManagedP = TunnelBackendFactory.RequiresManagedBackend(_config) && AppSettings.UseWireGuardNt;
+                if (forcedManagedP)
+                    Log("This tunnel uses AmneziaWG, which only the managed backend can speak \u2014 using the " +
+                        "managed backend for this connection.");
+                else if (AppSettings.UseWireGuardNt)
+                    Log("Using WireGuardNT (kernel) backend.");
+                tunnel = TunnelBackendFactory.Create(_config, AppSettings.UseWireGuardNt);
+            }
+            // Route activation through the always-running background manager
+            // service: activation is a pipe command it validates and
+            // acknowledges instantly, running the bring-up on its own worker
+            // (LocalSystem, survives logout, reconnects before login). This is
+            // what lets the GUI run unelevated.
+            else if (ServiceClient.IsServiceRunning())
+            {
+                Log("Background service running; activating through it.");
                 tunnel = new RemoteTunnelBackend(tunnelNameSnapshot);
                 ((RemoteTunnelBackend)tunnel).ServiceLogLine += LogRaw;
+            }
+            else if (!WgSharp.Core.Elevation.IsProcessElevated())
+            {
+                // No service and no elevation: this process cannot create the
+                // adapter itself. Offer the one-time setup instead of failing
+                // deep inside driver initialization with an access-denied.
+                Log("The background service isn't running, and WgSharp isn't elevated — a tunnel can't " +
+                    "be started from here without it.");
+                EnsureBackgroundServiceReady();
+                if (ServiceClient.IsServiceRunning())
+                {
+                    Log("Background service is now running; activating through it.");
+                    tunnel = new RemoteTunnelBackend(tunnelNameSnapshot);
+                    ((RemoteTunnelBackend)tunnel).ServiceLogLine += LogRaw;
+                }
+                else
+                {
+                    Log("Activation cancelled: the background service is not available.");
+                    return;
+                }
             }
             else
             {
@@ -1630,7 +1906,7 @@ namespace WgSharp.Ui
                 _tunnelPasswords[name] = storePw;
             }
 
-            ConfigStore.Save(name, text, storePw);
+            ConfigWriter.Save(name, text, storePw);
             if (lstTunnels.Items.IndexOf(name) < 0) lstTunnels.Items.Add(name);
             int idx = lstTunnels.Items.IndexOf(name);
             if (idx >= 0) lstTunnels.SelectedIndex = idx;
@@ -1690,7 +1966,7 @@ namespace WgSharp.Ui
                         _tunnelPasswords[_tunnelName] = pw;
                     }
 
-                    try { ConfigStore.Save(_tunnelName, _configText, pw); }
+                    try { ConfigWriter.Save(_tunnelName, _configText, pw); }
                     catch (Exception ex) { Log("Could not save new tunnel: " + ex.Message); }
 
                     if (lstTunnels.Items.IndexOf(_tunnelName) < 0)
@@ -1753,7 +2029,7 @@ namespace WgSharp.Ui
                         string text = ReadConfigFile(file); // handles plain or portable blob
                         if (text == null) continue;          // cancelled password
                         string name = ConfigStore.SanitizeName(Path.GetFileNameWithoutExtension(file));
-                        ConfigStore.Save(name, text, storePw);
+                        ConfigWriter.Save(name, text, storePw);
                         if (lstTunnels.Items.IndexOf(name) < 0) lstTunnels.Items.Add(name);
                         lastName = name; importedNames.Add(name); imported++;
                     }
@@ -1826,7 +2102,7 @@ namespace WgSharp.Ui
                         Path.GetFileNameWithoutExtension(entry.Name));
                     string text;
                     using (var r = new StreamReader(entry.Open())) text = r.ReadToEnd();
-                    ConfigStore.Save(name, text, storePw);
+                    ConfigWriter.Save(name, text, storePw);
                     if (lstTunnels.Items.IndexOf(name) < 0) lstTunnels.Items.Add(name);
                     names.Add(name);
                 }
@@ -1852,7 +2128,7 @@ namespace WgSharp.Ui
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
                 return;
 
-            try { ConfigStore.Delete(toRemove); } catch (Exception ex) { Log("Delete error: " + ex.Message); }
+            try { ConfigWriter.Delete(toRemove); } catch (Exception ex) { Log("Delete error: " + ex.Message); }
 
             int idx = lstTunnels.SelectedIndex;
             lstTunnels.Items.RemoveAt(idx);
@@ -1940,7 +2216,7 @@ namespace WgSharp.Ui
                     // If the tunnel was renamed, drop the old stored file.
                     if (!string.Equals(newName, _tunnelName, StringComparison.OrdinalIgnoreCase))
                     {
-                        try { ConfigStore.Delete(_tunnelName); } catch { }
+                        try { ConfigWriter.Delete(_tunnelName); } catch { }
                     }
                     _tunnelName = newName;
 
@@ -1980,11 +2256,11 @@ namespace WgSharp.Ui
                         if (pw == null) { Log("Save cancelled (no password)."); return; }
                         _tunnelPasswords[_tunnelName] = pw;
                     }
-                    ConfigStore.Save(_tunnelName, _configText, pw);
+                    ConfigWriter.Save(_tunnelName, _configText, pw);
                 }
                 else
                 {
-                    ConfigStore.Save(_tunnelName, _configText);
+                    ConfigWriter.Save(_tunnelName, _configText);
                 }
             }
             catch (Exception ex) { Log("Could not save tunnel: " + ex.Message); }

@@ -69,27 +69,35 @@ namespace WgSharp.Core
             if (!ServiceExeExists)
                 throw new Exception("Could not resolve WgSharp.exe's own path on disk.");
 
-            // Register (or re-point) the service with SCM. Deliberately does
-            // NOT start it: starting the service is what activates a tunnel,
-            // and there may be no tunnel selected at install time. Runtime
-            // start/stop is handled separately (StartTunnelService /
-            // StopTunnelService), modeled on the official WireGuard client,
-            // where the Manager installs the tunnel service and then asks SCM
-            // to start it as a distinct step.
-            //
-            // start= demand, NOT auto: the GUI starts the service explicitly
-            // when you click Activate. (Boot-time auto-reconnect is handled by
-            // flipping this to auto only while a tunnel is connected — see
-            // SetBootStart — so a reboot reconnects the last tunnel, but the
-            // service doesn't pointlessly start at boot when nothing was on.)
+            // Register (or re-point) the service with SCM as an ALWAYS-RUNNING
+            // manager: start= auto. The service idles when no tunnel is active
+            // and the GUI drives activation over the pipe — SCM start/stop is
+            // no longer the activation mechanism (that older model required an
+            // elevated GUI, i.e. a UAC prompt on every launch). Existing
+            // installs from the start=demand era are re-configured to auto
+            // here too, since Install() is the shared "make registration
+            // correct" path (first run, upgrades, RefreshIfStale).
             if (IsInstalled())
-                RunSc("config " + ServiceName + " binPath= " + BinPathValue, false);
+                RunSc("config " + ServiceName + " binPath= " + BinPathValue + " start= auto", false);
             else
                 RunSc("create " + ServiceName +
                       " binPath= " + BinPathValue +
-                      " start= demand" +
+                      " start= auto" +
                       " obj= LocalSystem" +
                       " DisplayName= \"WgSharp Tunnel Service\"", false);
+        }
+
+        /// <summary>
+        /// Install (or fix) the registration and make sure the service is
+        /// actually running — the one-time elevated setup calls this. Unlike
+        /// the old activation flow, starting here just brings up the IDLE
+        /// manager; it doesn't activate any tunnel.
+        /// </summary>
+        public static void EnsureInstalledAndRunning()
+        {
+            Install();
+            if (!IsRunning())
+                StartTunnelService();
         }
 
         public static void Uninstall()

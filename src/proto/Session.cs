@@ -84,70 +84,102 @@ namespace WgSharp.Proto
         /// </summary>
         public bool UsingCng { get { return _useCng; } }
 
-        /// <summary>Wrap a plaintext IP packet into a transport message ready for UDP.</summary>
+        // Reusable nonce buffers. _sendNonce is guarded by _sendLock (Encrypt is
+        // called from both the outbound loop and the keepalive timer). _recvNonce
+        // relies on Decrypt/DecryptInto being called only from the single inbound
+        // loop thread, which is the case today; if a second inbound worker is
+        // ever added, give each its own Session-facing scratch.
+        private readonly byte[] _sendNonce = new byte[12];
+        private readonly byte[] _recvNonce = new byte[12];
+
+        /// <summary>
+        /// Wrap a plaintext IP packet into a transport message ready for UDP.
+        /// The payload is encrypted directly into the returned message buffer
+        /// (header written first, ciphertext+tag at Tr_Payload) — no
+        /// intermediate ciphertext array or copy. The whole operation runs
+        /// under _sendLock so the counter, nonce scratch, and CNG handle are
+        /// used consistently; keepalives (the only other caller) are rare
+        /// enough that the serialization is free in practice, and the CNG
+        /// backend serializes on its own key-handle lock anyway.
+        /// </summary>
         public byte[] Encrypt(byte[] plaintext, int offset, int length)
         {
-            ulong counter;
-            lock (_sendLock) { counter = _sendCounter++; }
+            lock (_sendLock)
+            {
+                // Hard stop at the message ceiling. Time-based rekey and the
+                // tunnel maintenance loop normally retire a session long before
+                // this, but never emit a packet at or past RejectAfterMessages:
+                // continuing would eventually roll the 64-bit counter and reuse
+                // a (key, nonce) pair, which is catastrophic for ChaCha20-Poly1305.
+                // Fail closed instead — the caller drops the packet and the
+                // session is rekeyed.
+                if (_sendCounter >= RejectAfterMessages)
+                    throw new InvalidOperationException("Send counter exhausted; session must be rekeyed.");
+                ulong counter = _sendCounter++;
 
-            byte[] nonce = ChaCha20Poly1305.NonceFromCounter(counter);
-            byte[] ct;
+                ChaCha20Poly1305.NonceFromCounterInto(counter, _sendNonce);
 
+                byte[] msg = new byte[Messages.TransportHeaderSize + length + 16];
+                msg[0] = Messages.TypeTransport;
+                Messages.WriteLE32(msg, Messages.Tr_Receiver, _remoteIndex);
+                Messages.WriteLE64(msg, Messages.Tr_Counter, counter);
+
+                if (_useCng)
+                    _cngSend.EncryptInto(plaintext, offset, length, _sendNonce, msg, Messages.Tr_Payload);
+                else
+                    ChaCha20Poly1305.EncryptInto(_sendKey, _sendNonce, plaintext, offset, length,
+                                                 EmptyAad, msg, Messages.Tr_Payload);
+                return msg;
+            }
+        }
+
+        /// <summary>
+        /// Decrypt an inbound transport message into a caller-supplied buffer
+        /// (which must hold at least length - TransportHeaderSize - 16 bytes).
+        /// Returns true with ptLen set on success — ptLen == 0 is a keepalive.
+        /// Returns false if the message is malformed, the tag fails, or the
+        /// counter is a replay. Nothing is allocated on this path, so the
+        /// inbound loop can run a single reusable plaintext buffer.
+        /// Single-threaded by contract: see _recvNonce.
+        /// </summary>
+        public bool DecryptInto(byte[] msg, int length, byte[] output, out int ptLen)
+        {
+            ptLen = 0;
+            if (length < Messages.TransportHeaderSize + 16) return false;
+            if (msg[0] != Messages.TypeTransport) return false;
+
+            ulong counter = Messages.ReadLE64(msg, Messages.Tr_Counter);
+            ChaCha20Poly1305.NonceFromCounterInto(counter, _recvNonce);
+
+            int ctLen = length - Messages.Tr_Payload; // ciphertext + tag
+
+            bool ok;
             if (_useCng)
-            {
-                ct = _cngSend.Encrypt(plaintext, offset, length, nonce);
-            }
+                ok = _cngRecv.DecryptInto(msg, Messages.Tr_Payload, ctLen, _recvNonce, output, 0);
             else
-            {
-                byte[] pt = plaintext;
-                if (offset != 0 || length != plaintext.Length)
-                {
-                    pt = new byte[length];
-                    Array.Copy(plaintext, offset, pt, 0, length);
-                }
-                ct = ChaCha20Poly1305.Encrypt(_sendKey, nonce, pt, EmptyAad);
-            }
+                ok = ChaCha20Poly1305.DecryptInto(_recvKey, _recvNonce, msg, Messages.Tr_Payload, ctLen,
+                                                  EmptyAad, output, 0);
+            if (!ok) return false; // bad tag
 
-            byte[] msg = new byte[Messages.TransportHeaderSize + ct.Length];
-            msg[0] = Messages.TypeTransport;
-            Messages.WriteLE32(msg, Messages.Tr_Receiver, _remoteIndex);
-            Messages.WriteLE64(msg, Messages.Tr_Counter, counter);
-            Array.Copy(ct, 0, msg, Messages.Tr_Payload, ct.Length);
-            return msg;
+            // Only update the replay window after authentication succeeds.
+            if (!_replay.CheckAndUpdate(counter)) return false; // replay / too old
+
+            ptLen = ctLen - 16;
+            return true;
         }
 
         /// <summary>
         /// Decrypt an inbound transport message. Returns the plaintext IP packet,
         /// or null if the tag fails or the counter is a replay. A zero-length
-        /// result (keepalive) returns an empty array, not null.
+        /// result (keepalive) returns an empty array, not null. Allocating
+        /// wrapper over DecryptInto, kept for callers that want an owned array.
         /// </summary>
         public byte[] Decrypt(byte[] msg, int length)
         {
             if (length < Messages.TransportHeaderSize + 16) return null;
-            if (msg[0] != Messages.TypeTransport) return null;
-
-            ulong counter = Messages.ReadLE64(msg, Messages.Tr_Counter);
-            byte[] nonce  = ChaCha20Poly1305.NonceFromCounter(counter);
-
-            int ctLen = length - Messages.Tr_Payload;
-            byte[] ct = new byte[ctLen];
-            Array.Copy(msg, Messages.Tr_Payload, ct, 0, ctLen);
-
-            byte[] pt;
-            if (_useCng)
-            {
-                pt = _cngRecv.Decrypt(ct, ctLen, nonce);
-            }
-            else
-            {
-                pt = ChaCha20Poly1305.Decrypt(_recvKey, nonce, ct, EmptyAad);
-            }
-
-            if (pt == null) return null; // bad tag
-
-            // Only update the replay window after authentication succeeds.
-            if (!_replay.CheckAndUpdate(counter)) return null; // replay / too old
-
+            byte[] pt = new byte[length - Messages.Tr_Payload - 16];
+            int n;
+            if (!DecryptInto(msg, length, pt, out n)) return null;
             return pt;
         }
 

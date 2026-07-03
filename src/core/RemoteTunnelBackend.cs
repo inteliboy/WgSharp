@@ -4,16 +4,15 @@ namespace WgSharp.Core
 {
     /// <summary>
     /// An ITunnelBackend that doesn't run a tunnel itself — it drives the
-    /// background service, which runs the tunnel as a LocalSystem process.
-    ///
-    /// Modeled on the official WireGuard for Windows client: activation is
-    /// STARTING the service (SCM runs the bring-up inside the service's
-    /// OnStart, and SCM owns that multi-second operation), and deactivation
-    /// is STOPPING it. This replaces an earlier, broken approach that sent an
-    /// "activate" COMMAND over a named pipe and waited for the whole bring-up
-    /// to finish on that one request — which held the pipe open ~1s, timed
-    /// out, and tore the tunnel back down. SCM is the right tool for a long-
-    /// running start; the pipe is used only for the quick STATUS query.
+    /// always-running background manager service, which runs the tunnel as a
+    /// LocalSystem process. Activation and deactivation are pipe commands
+    /// (ACTIVATE / ACTIVATE2 / DEACTIVATE) that the service validates and
+    /// acknowledges INSTANTLY, running the multi-second bring-up/teardown on
+    /// its own worker — so this class never holds the pipe open across slow
+    /// work (the failure mode of a much earlier design), and it also never
+    /// touches SCM or HKLM, which is what lets the GUI run unelevated with no
+    /// UAC prompt. Progress and results are observed the same way as always:
+    /// the STATUS poll and the pumped service LOG.
     /// </summary>
     public sealed class RemoteTunnelBackend : ITunnelBackend
     {
@@ -26,49 +25,72 @@ namespace WgSharp.Core
         /// </summary>
         public event Action<string> ServiceLogLine;
         private readonly string _name;
+        private readonly string _portableConfigText; // non-null => ACTIVATE2 (portable tunnel, decrypted by the GUI)
 
-        public RemoteTunnelBackend(string tunnelName)
+        public RemoteTunnelBackend(string tunnelName) : this(tunnelName, null) { }
+
+        /// <summary>
+        /// portableConfigText: for portable (password-encrypted) tunnels the
+        /// GUI decrypts the config locally and passes the plaintext here; it
+        /// travels to the service over the local, ACL'd pipe (ACTIVATE2) and
+        /// is never persisted by the service. Null for normal machine-store
+        /// tunnels, which the service loads itself by name.
+        /// </summary>
+        public RemoteTunnelBackend(string tunnelName, string portableConfigText)
         {
             _name = tunnelName;
+            _portableConfigText = portableConfigText;
         }
 
         private void Log(string m) { var h = LogMessage; if (h != null) h(WgSharp.Core.Logger.Tag(m, "Service")); }
 
         public void Start()
         {
-            Log("Starting the background service for '" + _name + "'\u2026");
-            // Tell the service which tunnel to bring up, THEN start it. The
-            // service reads this in its OnStart. (Set-then-start, never a
-            // command race: the name is durably persisted before SCM launches
-            // the service, so the service always sees the right tunnel.)
-            ServiceState.SetLastTunnel(_name);
-            try
-            {
-                ServiceInstaller.StartTunnelService();
-                // While connected through the service, flip it to auto-start so
-                // a reboot reconnects this tunnel before login. Cleared back to
-                // demand on Stop(), so an explicit disconnect stays disconnected
-                // across reboots.
-                ServiceInstaller.SetBootStart(true);
-                Log("Background service started; tunnel '" + _name + "' is coming up.");
-            }
-            catch (Exception ex)
-            {
-                // Starting failed (or the service's own bring-up failed and it
-                // stopped itself, which surfaces as a start timeout/failure).
-                ServiceState.Clear();
-                ServiceInstaller.SetBootStart(false);
-                throw new Exception("The background service did not start the tunnel: " + ex.Message);
-            }
+            Log("Asking the background service to activate '" + _name + "'\u2026");
+            string cmd = _portableConfigText == null
+                ? "ACTIVATE|" + _name
+                : "ACTIVATE2|" + _name + "|" + ServiceProtocol.Escape(_portableConfigText);
+
+            string err;
+            string resp = ServiceClient.SendCommand(cmd, out err);
+
+            if (resp == null)
+                throw new Exception(
+                    "The background service isn't reachable (" + (err ?? "no response") + "). " +
+                    "If it was never set up, run the one-time administrator setup from the prompt at startup " +
+                    "(or start WgSharp elevated once).");
+            if (resp == "DENIED")
+                throw new Exception(
+                    "The background service refused the command: your Windows account must be a member of " +
+                    "the Administrators group to control tunnels.");
+            if (resp.StartsWith("ERR|", StringComparison.Ordinal))
+                throw new Exception("The background service rejected the activation: " +
+                                    ServiceProtocol.Unescape(resp.Substring(4)));
+            if (resp != "OK")
+                throw new Exception("Unexpected service reply: " + resp);
+
+            // Accepted: the bring-up continues on the service's worker; the
+            // GUI's STATUS poll and log pump take it from here (a failed
+            // bring-up shows up as the service logging the error and STATUS
+            // returning to INACTIVE).
+            Log("Background service accepted the activation; tunnel '" + _name + "' is coming up.");
         }
 
         public void Stop()
         {
-            Log("Stopping the background service\u2026");
-            // Explicit disconnect: don't reconnect this at the next boot.
-            ServiceInstaller.SetBootStart(false);
-            ServiceState.Clear();
-            ServiceInstaller.StopTunnelService();
+            Log("Asking the background service to deactivate\u2026");
+            string err;
+            string resp = ServiceClient.SendCommand("DEACTIVATE", out err);
+            if (resp == null)
+                Log("Deactivate: service not reachable (" + (err ?? "no response") + ") — if the service is " +
+                    "stopped, the tunnel is already down.");
+            else if (resp == "DENIED")
+                throw new Exception("The background service refused the command: your Windows account must be " +
+                                    "a member of the Administrators group to control tunnels.");
+            else if (resp != "OK")
+                Log("Deactivate: unexpected service reply: " + resp);
+            // Teardown continues on the service's worker; STATUS flips to
+            // INACTIVE when it's done.
         }
 
         public TunnelStatus GetStatus()
@@ -104,9 +126,13 @@ namespace WgSharp.Core
             TunnelStatus s = ServiceProtocol.ParseStatus(resp, out name);
             if (s != null) return s;
 
-            // No status yet: reflect whether the service is at least running.
+            // No ACTIVE status. With the always-running manager service,
+            // INACTIVE means the tunnel is down (activation still starting,
+            // failed, or deactivated). An unreachable pipe right after an
+            // accepted ACTIVATE is the brief startup race — show Handshaking
+            // so the UI doesn't flicker to Idle mid-bring-up; otherwise Idle.
             var fallback = new TunnelStatus();
-            fallback.State = ServiceInstaller.IsRunning() ? "Handshaking" : "Idle";
+            fallback.State = (resp == null) ? "Handshaking" : "Idle";
             return fallback;
         }
 

@@ -10,30 +10,37 @@ using WgSharp.Core;
 namespace WgSharp.Svc
 {
     /// <summary>
-    /// The background tunnel service, modeled on the official WireGuard for
-    /// Windows "tunnel service" (wireguard.exe /tunnelservice). The crucial
-    /// design point, learned from that implementation: activating a tunnel is
-    /// STARTING this service, and deactivating is STOPPING it — the slow
-    /// (~1s) adapter/route/driver bring-up IS this service's own OnStart, and
-    /// the Service Control Manager owns that long-running operation, with its
-    /// own start/stop timeouts and state machine.
+    /// The background tunnel MANAGER service. It runs continuously (installed
+    /// start=auto), idling when no tunnel is active, and the GUI drives it
+    /// entirely over the named pipe — ACTIVATE / DEACTIVATE / SAVECONFIG /
+    /// DELETECONFIG — so the GUI itself can run unelevated (asInvoker, no UAC
+    /// prompt at launch). Control commands are restricted to Administrators-
+    /// group members, verified against the client's UAC LINKED token so an
+    /// admin's unelevated GUI passes without any prompt (see PipeClientAuth).
     ///
-    /// An earlier version of WgSharp tried to drive activation as a command
-    /// sent over a named pipe, which held the pipe open for the entire
-    /// bring-up; the client gave up waiting, and the resulting teardown stopped
-    /// the tunnel that had just come up. SCM is the right tool for a multi-
-    /// second start, so we let it do exactly what it does for the official
-    /// client: start the process, let Execute/OnStart bring the tunnel up, and
-    /// report SERVICE_RUNNING once it's up.
+    /// The earlier design made activation an SCM start of this service and
+    /// deactivation an SCM stop — which forced the GUI to hold SCM rights,
+    /// i.e. to be elevated, i.e. a UAC prompt on every launch. Before that,
+    /// an even earlier design DID use a pipe ACTIVATE command but held the
+    /// pipe open for the entire ~1s bring-up, which timed the client out and
+    /// tore down the tunnel it had just started. This version keeps the pipe
+    /// command but bakes in that lesson: a control command only VALIDATES
+    /// synchronously and replies instantly ("OK"/"ERR|..."); the actual
+    /// bring-up/teardown runs on a worker thread, serialized by _lock, and
+    /// the GUI follows progress the way it always has — polling STATUS and
+    /// pumping LOG.
     ///
-    /// Which tunnel to run is read from ServiceState (persisted, machine-wide)
-    /// — set by the GUI just before it asks SCM to start the service. Only
-    /// non-portable (machine-DPAPI) tunnels work here; portable tunnels are
-    /// password-encrypted and there's no human at a pre-login service.
+    /// Boot reconnect: ServiceState (HKLM, written by THIS service now, never
+    /// by the GUI) remembers the last successfully requested tunnel; OnStart
+    /// re-activates it. Deactivation clears it. Portable (password-encrypted)
+    /// tunnels are activated via ACTIVATE2 with the decrypted config supplied
+    /// by the GUI and are never persisted — there is no human at boot to type
+    /// a password.
     /// </summary>
     public sealed class WgSharpService : ServiceBase
     {
         private ITunnelBackend _tunnel;
+        private string _activeName;              // guarded by _lock
         private readonly object _lock = new object();
         private readonly object _logLock = new object();
         private Thread _pipeThread;
@@ -50,50 +57,55 @@ namespace WgSharp.Svc
         protected override void OnStart(string[] args)
         {
             _stopping = false;
-            // Lightweight STATUS-only pipe server. Unlike the earlier broken
-            // design, this NEVER does slow work on a pipe request — activation
-            // is driven by SCM (this very OnStart), not by a pipe command — so
-            // the pipe only ever answers quick STATUS/PING queries and can't
-            // hang the client.
+            // Pipe server: quick queries for everyone, control commands for
+            // admins. Command handling NEVER does slow work on the pipe (see
+            // class comment) so a request can't hang the client.
             _pipeThread = new Thread(PipeServerLoop) { IsBackground = true, Name = "wgsharpsvc-pipe" };
             _pipeThread.Start();
 
-            // OnStart must return promptly-ish; the actual bring-up runs on a
-            // worker thread and we let SCM see us as started. (The official
-            // client similarly does its heavy lifting inside the service's
-            // Execute and relies on SCM's start-pending window.) Bringing up
-            // the adapter here, in the service's own start, is the whole point
-            // — this is the long-running operation SCM is built to manage.
+            // Driver bootstrap moved here from the GUI: the asInvoker GUI can
+            // no longer write wintun.dll / wireguard.dll next to the exe in
+            // Program Files, but this LocalSystem service can. Async and
+            // best-effort, exactly as it was in the GUI.
+            try
+            {
+                WgSharp.Tun.DriverBootstrap.Log += LogLine;
+                WgSharp.Tun.DriverBootstrap.EnsureDriversAsync();
+            }
+            catch (Exception ex) { LogLine(Logger.DebugMarker + "Driver bootstrap error: " + ex.Message); }
+
+            // Boot / restart reconnect: if a tunnel was active when we last
+            // ran, bring it back up. No tunnel set (the normal always-on idle
+            // case) just idles — the service stays up waiting for pipe
+            // commands, it never stops itself anymore.
             string name = ServiceState.GetLastTunnel();
-            LogLine("Service starting" + (string.IsNullOrEmpty(name) ? " (no tunnel set)." : " for tunnel '" + name + "'."));
+            LogLine("Service starting" + (string.IsNullOrEmpty(name) ? " (idle; no tunnel to reconnect)." : "; reconnecting tunnel '" + name + "'."));
+            if (!string.IsNullOrEmpty(name))
+                StartActivationWorker(name, null);
+        }
 
-            if (string.IsNullOrEmpty(name))
-            {
-                // Nothing to do; a bare start with no tunnel selected just idles.
-                // (Shouldn't normally happen — the GUI sets the tunnel before
-                // starting us — but we must not crash if it does.)
-                return;
-            }
-
-            if (AppSettings.PortableMode)
-            {
-                LogLine("Portable mode is on; the service can't use password-encrypted tunnels. Stopping.");
-                // Signal failure so SCM/the GUI sees this didn't take.
-                ExitCode = 1;
-                Stop();
-                return;
-            }
-
+        /// <summary>
+        /// Runs the multi-second bring-up on a worker thread — the pipe (or
+        /// OnStart) has already replied by the time this runs. configText is
+        /// null for named (machine-store) tunnels and the decrypted config for
+        /// portable ACTIVATE2 activations. Failure logs, clears the persisted
+        /// reconnect state, and leaves the service running and idle.
+        /// </summary>
+        private void StartActivationWorker(string name, string configText)
+        {
             Thread t = new Thread(delegate ()
             {
-                try { ActivateInternal(name); LogLine("Tunnel '" + name + "' is up."); }
+                try
+                {
+                    if (configText == null) ActivateInternal(name);
+                    else ActivateParsed(name, Config.Parse(configText));
+                    LogLine("Tunnel '" + name + "' is up.");
+                }
                 catch (Exception ex)
                 {
                     LogLine("Activation failed: " + ex.Message);
-                    // Surface the failure as a service-specific exit so the
-                    // GUI (watching SCM state) can tell it didn't come up.
-                    ExitCode = 1;
-                    try { Stop(); } catch { }
+                    ServiceState.Clear();
+                    lock (_lock) { _activeName = null; }
                 }
             });
             t.IsBackground = true;
@@ -118,21 +130,29 @@ namespace WgSharp.Svc
         private void ActivateInternal(string name)
         {
             // The service only ever operates on the machine (non-portable)
-            // store — it cannot decrypt portable tunnels without a human.
+            // store — it cannot decrypt portable tunnels without a human
+            // (those arrive pre-decrypted via ACTIVATE2 -> ActivateParsed).
+            ActivateParsed(name, Config.Parse(LoadMachineConfig(name)));
+        }
+
+        /// <summary>Reads a named config from the machine store regardless of the portable-mode setting.</summary>
+        private static string LoadMachineConfig(string name)
+        {
             bool wasPortable = AppSettings.PortableMode;
             AppSettings.PortableMode = false;
-            string text;
-            try { text = ConfigStore.Load(name); }
+            try { return ConfigStore.Load(name); }
             finally { AppSettings.PortableMode = wasPortable; }
+        }
 
-            Config cfg = Config.Parse(text);
-
+        private void ActivateParsed(string name, Config cfg)
+        {
             lock (_lock)
             {
                 if (_tunnel != null)
                 {
                     try { _tunnel.Stop(); } catch (Exception ex) { LogLine("Stop (pre-switch) error: " + ex.Message); }
                     _tunnel = null;
+                    _activeName = null;
                 }
 
                 bool wantNt = AppSettings.UseWireGuardNt &&
@@ -172,6 +192,7 @@ namespace WgSharp.Svc
                 }
 
                 _tunnel = tunnel;
+                _activeName = name;
             }
         }
 
@@ -265,29 +286,51 @@ namespace WgSharp.Svc
             string line = reader.ReadLine();
             if (line == null) return;
 
+            // Split off the command verb; the remainder (if any) is parsed
+            // per-command, splitting on at most one more '|' so escaped config
+            // payloads pass through untouched.
+            int sep = line.IndexOf('|');
+            string verb = sep < 0 ? line : line.Substring(0, sep);
+            string rest = sep < 0 ? null : line.Substring(sep + 1);
+
             string reply;
-            if (line == "PING")
+            if (verb == "PING")
             {
                 reply = "PONG";
             }
-            else if (line == "STATUS")
+            else if (verb == "STATUS")
             {
                 lock (_lock)
                 {
                     reply = _tunnel == null
                         ? "INACTIVE"
-                        : ServiceProtocol.FormatStatus(ServiceState.GetLastTunnel(), _tunnel.GetStatus());
+                        : ServiceProtocol.FormatStatus(_activeName ?? ServiceState.GetLastTunnel(), _tunnel.GetStatus());
                 }
                 LogLine(Logger.DebugMarker + "STATUS query answered: " + reply);
             }
-            else if (line == "LOG")
+            else if (verb == "LOG")
             {
                 // Hand the GUI the recent in-memory service log so it can show
                 // service activity in its Log tab without any file on disk.
-                // Encoded as one line: backslashes and newlines are escaped so
-                // the whole snapshot travels as a single pipe message.
                 string snap = DrainLogSnapshot();
-                reply = "LOG|" + snap.Replace("\\", "\\\\").Replace("\n", "\\n");
+                reply = "LOG|" + ServiceProtocol.Escape(snap);
+            }
+            else if (verb == "ACTIVATE" || verb == "ACTIVATE2" || verb == "DEACTIVATE" ||
+                     verb == "SAVECONFIG" || verb == "DELETECONFIG")
+            {
+                // CONTROL commands: the client's user must be an
+                // Administrators member (directly, or via the UAC linked
+                // token — which is how the unelevated GUI of an admin
+                // qualifies without any prompt). Standard users get DENIED.
+                if (!PipeClientAuth.IsAdminClient(server))
+                {
+                    LogLine("Denied control command from a non-administrator client: " + verb);
+                    reply = "DENIED";
+                }
+                else
+                {
+                    reply = HandleControl(verb, rest);
+                }
             }
             else
             {
@@ -297,6 +340,113 @@ namespace WgSharp.Svc
             writer.WriteLine(reply);
             writer.Flush();
             try { server.WaitForPipeDrain(); } catch { } // ensure the client actually got it before we close
+        }
+
+        /// <summary>
+        /// Executes an authorized control command. Everything here follows one
+        /// rule: VALIDATE synchronously (fast: parse a name, read + decrypt +
+        /// parse a config file), reply immediately, and push any slow work
+        /// (adapter bring-up, teardown) onto a worker thread. That keeps every
+        /// pipe request instant, which is the fix for the historical
+        /// held-open-pipe activation bug described in the class comment.
+        /// </summary>
+        private string HandleControl(string verb, string rest)
+        {
+            try
+            {
+                if (verb == "DEACTIVATE")
+                {
+                    LogLine("Deactivation requested.");
+                    // Don't reconnect this at the next boot.
+                    ServiceState.Clear();
+                    Thread t = new Thread(delegate ()
+                    {
+                        StopTunnelInternal();
+                        lock (_lock) { _activeName = null; }
+                        LogLine("Tunnel deactivated; service idle.");
+                    });
+                    t.IsBackground = true;
+                    t.Name = "wgsharpsvc-deactivate";
+                    t.Start();
+                    return "OK";
+                }
+
+                if (verb == "ACTIVATE")
+                {
+                    string name = rest;
+                    if (string.IsNullOrEmpty(name)) return "ERR|No tunnel name given.";
+                    // Validate NOW so the caller gets a real error instead of
+                    // an OK followed by a silent failure: the config must
+                    // exist in the machine store, decrypt, and parse.
+                    try { Config.Parse(LoadMachineConfig(name)); }
+                    catch (Exception ex) { return "ERR|" + ServiceProtocol.Escape("Config '" + name + "' could not be loaded: " + ex.Message); }
+                    LogLine("Activation requested for tunnel '" + name + "'.");
+                    // Set-then-activate, exactly the old SCM flow's ordering:
+                    // persist the reconnect intent before bring-up; the worker
+                    // clears it again if bring-up fails.
+                    ServiceState.SetLastTunnel(name);
+                    StartActivationWorker(name, null);
+                    return "OK";
+                }
+
+                if (verb == "ACTIVATE2")
+                {
+                    // Portable tunnel: the GUI decrypted it with the user's
+                    // password and sends the plaintext config over the pipe
+                    // (local, ACL'd). Never persisted — no password at boot.
+                    if (rest == null) return "ERR|Malformed ACTIVATE2.";
+                    int p = rest.IndexOf('|');
+                    if (p <= 0 || p == rest.Length - 1) return "ERR|Malformed ACTIVATE2.";
+                    string name = rest.Substring(0, p);
+                    string text = ServiceProtocol.Unescape(rest.Substring(p + 1));
+                    try { Config.Parse(text); }
+                    catch (Exception ex) { return "ERR|" + ServiceProtocol.Escape("Config did not parse: " + ex.Message); }
+                    LogLine("Activation requested for portable tunnel '" + name + "' (config supplied by the GUI; not persisted).");
+                    ServiceState.Clear();
+                    StartActivationWorker(name, text);
+                    return "OK";
+                }
+
+                if (verb == "SAVECONFIG")
+                {
+                    // Machine-store write performed as SYSTEM. This is what
+                    // lets the unelevated GUI keep editing tunnels that were
+                    // created by older elevated versions (whose files in
+                    // ProgramData are owned by Administrators and reject an
+                    // unelevated same-user write).
+                    if (rest == null) return "ERR|Malformed SAVECONFIG.";
+                    int p = rest.IndexOf('|');
+                    if (p <= 0) return "ERR|Malformed SAVECONFIG.";
+                    string name = rest.Substring(0, p);
+                    string text = ServiceProtocol.Unescape(rest.Substring(p + 1));
+                    try { Config.Parse(text); } // don't persist garbage as SYSTEM
+                    catch (Exception ex) { return "ERR|" + ServiceProtocol.Escape("Config did not parse: " + ex.Message); }
+                    bool wasPortable = AppSettings.PortableMode;
+                    AppSettings.PortableMode = false;
+                    try { ConfigStore.Save(name, text); }
+                    finally { AppSettings.PortableMode = wasPortable; }
+                    LogLine("Config '" + name + "' saved to the machine store.");
+                    return "OK";
+                }
+
+                if (verb == "DELETECONFIG")
+                {
+                    string name = rest;
+                    if (string.IsNullOrEmpty(name)) return "ERR|No tunnel name given.";
+                    bool wasPortable = AppSettings.PortableMode;
+                    AppSettings.PortableMode = false;
+                    try { ConfigStore.Delete(name); }
+                    finally { AppSettings.PortableMode = wasPortable; }
+                    LogLine("Config '" + name + "' deleted from the machine store.");
+                    return "OK";
+                }
+
+                return "ERROR:unsupported";
+            }
+            catch (Exception ex)
+            {
+                return "ERR|" + ServiceProtocol.Escape(ex.Message);
+            }
         }
 
         // ---------------- logging ----------------

@@ -220,15 +220,37 @@ namespace WgSharp.Ui
             if (_loading) return;
             try
             {
+                // Registering/removing a service is an SCM operation, which
+                // the asInvoker GUI can't do directly. When elevated (manual
+                // "Run as administrator" / UAC off) do it inline as before;
+                // otherwise self-elevate for this one action — the same
+                // single-prompt pattern as the first-run setup.
+                bool elevated = Elevation.IsProcessElevated();
                 if (_autoStart.Checked)
                 {
-                    ServiceInstaller.Install();
+                    if (elevated) ServiceInstaller.EnsureInstalledAndRunning();
+                    else
+                    {
+                        string err;
+                        if (!Elevation.RunElevatedSetup(out err))
+                            throw new Exception(err == "cancelled"
+                                ? "the administrator prompt was cancelled"
+                                : err);
+                    }
                     AppSettings.ServiceWasInstalled = true;
                     AppSettings.Save();
                 }
                 else
                 {
-                    ServiceInstaller.Uninstall();
+                    if (elevated) ServiceInstaller.Uninstall();
+                    else
+                    {
+                        string err;
+                        if (!Elevation.RunElevated("--elevated-uninstall-service", out err))
+                            throw new Exception(err == "cancelled"
+                                ? "the administrator prompt was cancelled"
+                                : err);
+                    }
                     AppSettings.ServiceWasInstalled = false;
                     AppSettings.Save();
                 }
