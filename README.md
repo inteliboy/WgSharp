@@ -67,6 +67,7 @@ transport data path. A WinForms GUI. All compiled with `csc.exe` alone —
 | 📊 **Live stats** | Upload/download charts, session duration, total transferred, and tunnel latency. |
 | ✍️ **Config editor** | Syntax highlighting, a live-derived public key, and QR export. |
 | 📷 **Scan from QR code** *(experimental)* | Add a tunnel by pointing the webcam at a QR code (or scanning a saved image) — a from-scratch QR decoder, no external library. Enabled via **Settings → Show experimental features**. |
+| 🔔 **Update notifications** | Quietly checks GitHub at startup for a newer release and shows a clickable tray notification if one exists — informational only, never auto-downloads. Opt out via **Settings → Check for updates**. |
 | 🧰 **System tray** | Live status tooltip, quick-connect menu, closing the window minimizes instead of exiting. |
 | ℹ️ **About dialog** | Version, GitHub link, and Buy Me a Coffee support link — accessible from the window's system menu. |
 
@@ -160,6 +161,21 @@ a signing failure (e.g. an unreachable timestamp server) warns but never fails
 the build. `signtool.exe` is located via a `SIGNTOOL` environment variable, the
 newest Windows 10/11 SDK, or `PATH`, in that order.
 
+**Two interactive prompts** near the end (both skippable via an environment
+variable, so unattended/CI builds never block):
+
+- *Keep the `.wixpdb`?* — `light.exe` writes a `WgSharp-Setup.wixpdb` symbol
+  file next to the MSI. It's only useful for authoring binary MSP patches
+  between MSI versions (which this project doesn't do — it ships full upgrade
+  MSIs), so the default is **No** (suppressed with `-spdb`). Set `WIXPDB=1` to
+  keep it or `WIXPDB=0` to suppress it without being asked.
+- *Build the portable zip?* — packages the **same** `WgSharp.exe` (the mode is
+  decided by run location, not filename, so there's no separate "portable exe")
+  together with `README.md` and `LICENSE` into
+  `bin\amd64\WgSharp-<version>-portable.zip`. Default **Yes**. Set
+  `PORTABLEZIP=1`/`0` to force it on/off. Unzipped anywhere outside
+  `Program Files`, that copy runs in portable mode.
+
 **Installing or upgrading automatically closes a running WgSharp** — both the
 GUI and the background service, which are the same exe — before touching
 files:
@@ -181,11 +197,18 @@ files:
   running after a few seconds — so the file is unlocked no matter what.
 
 Note that `util:CloseApplication` has no UI of its own — these mechanisms work
-silently in the background, without showing a prompt. (Windows Installer's
-separate, optional native "Files in Use" dialog is unrelated and, per
-Microsoft's own documentation, never applies to a process without a visible
-titled window — exactly the background service's case — so it isn't a
-reliable fit for WgSharp regardless.)
+silently in the background, without showing a prompt. Windows Installer's
+*own* Restart Manager, however, does its file-lock detection early and, left
+enabled, could pop the native **"Setup was unable to close all running
+processes"** dialog before our own (more capable) shutdown even ran — racing
+the service's several-second tunnel-teardown and losing. `Product.wxs`
+therefore sets `MSIRESTARTMANAGERCONTROL=Disable`, handing shutdown entirely
+to the two explicit mechanisms above: `ServiceControl` (`Wait="yes"`, so the
+engine waits for the service teardown) and `util:CloseApplication`
+(`Timeout="15"`, then a `TerminateProcess` fallback). The service's own
+`OnStop` also calls `RequestAdditionalTime` and bounds its teardown on a
+worker thread, so a slow adapter/route cleanup is never mistaken for a hung
+service and can't stall the installer.
 
 Together these guarantee `WgSharp.exe` is genuinely unlocked by the time
 Setup writes the new one, with nothing depending on whether — or how — the
@@ -260,10 +283,13 @@ a standard user is refused.
 
 **Portable / non-installed use needs administrator rights.** A portable copy
 installs no service by design, so it must run elevated to create the adapter
-itself. If you launch a portable copy unelevated, WgSharp opens read-only —
-you can browse and edit tunnels, but **Connect is disabled** — and tells you to
-relaunch it with **right-click → Run as administrator**. Once elevated, a
-portable copy runs the tunnel in-process, touching nothing on the machine.
+itself. If you launch a portable copy unelevated, WgSharp offers to relaunch
+itself as administrator (**Yes** closes and reopens it with a UAC prompt).
+Choosing **No** simply closes WgSharp — portable mode can't create the adapter
+without elevation, so rather than leave a window that can't do anything, it
+exits and you can start it yourself with **right-click → Run as administrator**.
+Once elevated, a portable copy runs the tunnel in-process, touching nothing on
+the machine.
 Portable mode and the background service are mutually exclusive: portable never
 uses (or installs) the service, and an installed copy in `Program Files` can't
 switch to portable mode.
@@ -522,6 +548,14 @@ tunnels always run in the (elevated) GUI itself, never through the service.
   not function with every camera driver. **Show QR** on a selected tunnel
   (the QR icon in the toolbar) is always available regardless of this setting
   — it's just rendering an image from text, no hardware involved.
+- **Check for updates** — when on (the default), WgSharp quietly asks GitHub at
+  startup whether a newer release exists and, if so, shows a tray notification;
+  clicking it opens the [releases page](https://github.com/inteliboy/WgSharp/releases)
+  in your browser. It's entirely informational — WgSharp never downloads or
+  installs an update itself. The check runs on a background thread, forces
+  TLS 1.2, and swallows every failure (offline, GitHub rate-limiting, an API
+  change), so it can't slow down or disrupt startup. Turn it off to stop the
+  network request entirely.
 
 Settings persist to `HKEY_LOCAL_MACHINE\Software\WgSharp` in the registry
 (non-portable mode) or a `WgSharp.settings` file next to the executable
@@ -615,10 +649,19 @@ recognized automatically and prompts for its password; importing into a
 non-portable install decrypts it straight into the normal DPAPI store.
 
 Because a portable copy installs no background service, it needs administrator
-rights to create the adapter itself. Launched unelevated, it opens read-only
-(browse and edit, but Connect is disabled) and asks you to relaunch with
-**right-click → Run as administrator**; launched elevated, it runs the tunnel
-in-process and leaves no machine footprint. See [Run](#run).
+rights to create the adapter itself. Launched unelevated, it offers to
+relaunch itself as administrator (or, if declined, closes — portable mode
+needs elevation to do anything, so it doesn't leave a dead window open);
+launched elevated, it runs the tunnel in-process and leaves no machine
+footprint. Auto-start options (login GUI, background service) are also off and
+greyed out in portable mode, since a password-encrypted portable tunnel has no
+one present at boot/login to unlock it. See [Run](#run).
+
+Portable mode is **determined by where WgSharp runs from**, not a free choice:
+a copy in `Program Files` (an MSI install) is always non-portable, and a copy
+anywhere else is always portable. The Settings checkbox reflects this as a
+fixed, greyed indicator — checked for a standalone copy, unchecked for an
+install — so it can't drift from what the app actually does.
 
 ## Architecture
 
@@ -652,6 +695,7 @@ src/
     PortableCrypto.cs              AES-256-CBC + HMAC, encrypt-then-MAC
     AppSettings.cs                  persisted app settings (HKLM registry; file in portable mode)
     Elevation.cs                     elevation check + one-time "runas" self-launch
+    UpdateChecker.cs                 background GitHub "newer release?" check
     InstallLocation.cs                installed-vs-portable detection + first-run defaults
     Logger.cs                        Log-tab/service verbosity gate (Debug log toggle)
     LoginAutostart.cs                 per-user "start GUI at login" Run-key entry

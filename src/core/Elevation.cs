@@ -50,6 +50,39 @@ namespace WgSharp.Core
         }
 
         /// <summary>
+        /// Relaunches this exe elevated with its normal (GUI) arguments and
+        /// does NOT wait — the caller exits its own process so the elevated
+        /// copy takes over (used by portable mode's "relaunch as administrator"
+        /// offer). Returns true if the elevated process was started; on false,
+        /// "error" is "cancelled" when the user dismissed the UAC prompt.
+        /// </summary>
+        public static bool RelaunchElevated(out string error)
+        {
+            error = null;
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = Assembly.GetExecutingAssembly().Location,
+                    UseShellExecute = true,
+                    Verb = "runas"
+                };
+                Process p = Process.Start(psi);
+                return p != null;
+            }
+            catch (System.ComponentModel.Win32Exception)
+            {
+                error = "cancelled"; // UAC declined (ERROR_CANCELLED)
+                return false;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
+        /// <summary>
         /// Relaunches this exe elevated with the given arguments and waits.
         /// Used for the rare admin-only actions that remain after the
         /// asInvoker switch (setup, removing the service).

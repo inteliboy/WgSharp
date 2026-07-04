@@ -22,6 +22,7 @@ namespace WgSharp.Ui
         private readonly Label _guiAutoStartHelp;
         private readonly CheckBox _debugLog;
         private readonly CheckBox _experimental;
+        private readonly CheckBox _checkUpdates;
         private bool _loading;
 
         public event Action PortableModeChanged;
@@ -149,6 +150,26 @@ namespace WgSharp.Ui
             };
             _experimental.CheckedChanged += OnExperimentalChanged;
 
+            _checkUpdates = new CheckBox
+            {
+                Text = "Check for updates",
+                Location = new Point(16, 404),
+                Size = new Size(450, 22),
+                ForeColor = AppTheme.FieldValue,
+                Font = new Font("Segoe UI", 9.5F, FontStyle.Bold)
+            };
+            var checkUpdatesHelp = new Label
+            {
+                Text = "When on (default), WgSharp quietly checks GitHub at startup for a newer " +
+                       "release and shows a tray notification if one exists. It never downloads or " +
+                       "installs anything on its own \u2014 clicking the notification just opens the " +
+                       "releases page in your browser.",
+                Location = new Point(36, 426),
+                Size = new Size(450, 46),
+                ForeColor = AppTheme.FieldLabel
+            };
+            _checkUpdates.CheckedChanged += OnCheckUpdatesChanged;
+
             Controls.Add(_portable);
             Controls.Add(_portableHelp);
             Controls.Add(_wgNt);
@@ -161,6 +182,8 @@ namespace WgSharp.Ui
             Controls.Add(debugLogHelp);
             Controls.Add(_experimental);
             Controls.Add(experimentalHelp);
+            Controls.Add(_checkUpdates);
+            Controls.Add(checkUpdatesHelp);
         }
 
         public void LoadFromSettings()
@@ -178,6 +201,7 @@ namespace WgSharp.Ui
             catch { _guiAutoStart.Checked = false; }
             _debugLog.Checked = AppSettings.DebugLog;
             _experimental.Checked = AppSettings.ExperimentalFeatures;
+            _checkUpdates.Checked = AppSettings.CheckForUpdates;
             UpdateExclusivityEnabled();
             _loading = false;
         }
@@ -192,27 +216,65 @@ namespace WgSharp.Ui
         private void UpdateExclusivityEnabled()
         {
             bool portable = AppSettings.PortableMode;
-            bool anyStartup = _autoStart.Checked || _guiAutoStart.Checked;
 
-            // Startup options: usable only when not in portable mode (but a
-            // currently-checked one can still be unchecked).
-            _autoStart.Enabled = !portable || _autoStart.Checked;
+            // Startup options in portable mode: a portable tunnel is
+            // password-encrypted and there's no human at boot/login to type
+            // that password, so auto-start is meaningless. Portable mode is
+            // also permanently on for a standalone copy (locked by location),
+            // so unlike before we DON'T leave an "allow unchecking if currently
+            // checked" escape hatch — we force both OFF and hard-disable them,
+            // and push that back into settings so a config carried over from a
+            // non-portable install can't leave a stale checkmark behind.
+            if (portable)
+            {
+                if (_autoStart.Checked) _autoStart.Checked = false;
+                if (_guiAutoStart.Checked) _guiAutoStart.Checked = false;
+                if (AppSettings.ServiceWasInstalled) { AppSettings.ServiceWasInstalled = false; AppSettings.Save(); }
+                if (AppSettings.StartGuiAtLogin) { AppSettings.StartGuiAtLogin = false; AppSettings.Save(); }
+
+                _autoStart.Enabled = false;
+                _guiAutoStart.Enabled = false;
+            }
+            else
+            {
+                _autoStart.Enabled = true;
+                _guiAutoStart.Enabled = true;
+            }
             _autoStartHelp.Enabled = !portable;
-            _guiAutoStart.Enabled = !portable || _guiAutoStart.Checked;
             _guiAutoStartHelp.Enabled = !portable;
 
-            // Portable: usable only when no startup option is on (but if it's
-            // already on, allow turning it off) — UNLESS this is a proper
-            // Program Files install, in which case it's locked off entirely
-            // (see InstallLocation.cs): portable mode is for the standalone/
-            // zip distribution, not a real install.
+            // Portable mode is determined ENTIRELY by where WgSharp runs from,
+            // so the checkbox is informational (checked or not) and always
+            // disabled — never a free toggle:
+            //   * Proper Program Files install  -> portable OFF, locked. The
+            //     installed copy uses the machine DPAPI store and the
+            //     background service.
+            //   * Anywhere else (zip / USB / standalone folder) -> portable ON,
+            //     locked. A copy that travels with its own folder must keep its
+            //     configs in that folder (password-encrypted), and can't use a
+            //     machine-registered service.
+            // This mirrors what the app enforces at startup
+            // (InstallLocation.EnforcePortableModeRestriction and the portable
+            // first-run default), so the UI can't drift from actual behavior.
             bool installedLocation = WgSharp.Core.InstallLocation.IsInstalled();
-            _portable.Enabled = !installedLocation && (!anyStartup || _portable.Checked);
-            _portableHelp.Enabled = !installedLocation && !anyStartup;
+            _portable.Enabled = false;
+            _portableHelp.Enabled = false;
             if (installedLocation)
+            {
+                _portable.Checked = false;
                 _portableHelp.Text = "Not available: WgSharp was installed via the MSI installer to a " +
-                    "fixed location, and portable mode is only for the standalone copy that travels " +
-                    "with its own folder. Use the zip distribution instead if you need this.";
+                    "fixed location, so it uses the machine config store and the background service. " +
+                    "Portable mode is only for the standalone copy that travels with its own folder \u2014 " +
+                    "use the zip distribution if you need it.";
+            }
+            else
+            {
+                _portable.Checked = true;
+                _portableHelp.Text = "Always on for this copy: WgSharp is running from a standalone " +
+                    "location (not a Program Files install), so it keeps its tunnels in its own folder, " +
+                    "password-encrypted, and runs them in-process. To use the machine store and the " +
+                    "background service instead, install WgSharp with the MSI installer.";
+            }
         }
 
         private void OnAutoStartChanged(object sender, EventArgs e)
@@ -300,6 +362,13 @@ namespace WgSharp.Ui
         {
             if (_loading) return;
             AppSettings.DebugLog = _debugLog.Checked;
+            AppSettings.Save();
+        }
+
+        private void OnCheckUpdatesChanged(object sender, EventArgs e)
+        {
+            if (_loading) return;
+            AppSettings.CheckForUpdates = _checkUpdates.Checked;
             AppSettings.Save();
         }
 

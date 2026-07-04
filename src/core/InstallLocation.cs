@@ -134,13 +134,24 @@ namespace WgSharp.Core
         /// enforcement in case a settings file with PortableMode=true ever
         /// ends up next to an installed copy, e.g. copied in from elsewhere.)
         /// </summary>
+        /// <summary>
+        /// Keeps AppSettings.PortableMode consistent with WHERE WgSharp runs
+        /// from, in both directions:
+        ///   * Installed to Program Files  -> portable OFF (uses the machine
+        ///     store + background service).
+        ///   * Anywhere else               -> portable ON (a standalone/zip
+        ///     copy keeps its configs in its own folder and runs in-process).
+        /// Called once at startup (Program.cs). This makes the location the
+        /// single source of truth for the mode, so the Settings checkbox can
+        /// present it as a fixed, greyed indicator rather than a free toggle.
+        /// </summary>
         public static void EnforcePortableModeRestriction()
         {
-            if (!IsInstalled()) return;
-            if (!AppSettings.PortableMode) return;
             try
             {
-                AppSettings.PortableMode = false;
+                bool shouldBePortable = !IsInstalled();
+                if (AppSettings.PortableMode == shouldBePortable) return;
+                AppSettings.PortableMode = shouldBePortable;
                 AppSettings.Save();
             }
             catch { }

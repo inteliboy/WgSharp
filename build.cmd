@@ -183,9 +183,23 @@ if %ERRORLEVEL% neq 0 (
     goto :after_msi
 )
 
+rem --- Ask whether to keep the .wixpdb installer symbol file ----------
+rem  light.exe writes WgSharp-Setup.wixpdb next to the MSI by default. It's
+rem  only useful for authoring binary MSP patches between two MSI versions
+rem  (torch.exe) -- which this project doesn't do; it ships full MajorUpgrade
+rem  MSIs -- so by default we suppress it with -spdb to keep bin\amd64 clean
+rem  and avoid accidentally publishing the installer's internal structure.
+rem  Override without being prompted by setting WIXPDB=1 (keep) or WIXPDB=0
+rem  (suppress) before running; handy for CI, where a blocking prompt would
+rem  hang. Interactive default (just pressing Enter) is No / suppress.
+rem  Done via a CALL (not an inline if-block) so this stays correct without
+rem  enabledelayedexpansion, which the header explains must not be used here.
+call :decide_wixpdb
+
 "%WIXBIN%\light.exe" -nologo ^
     -ext WixUIExtension -ext WixUtilExtension ^
     -sice:ICE61 ^
+    %SPDB_FLAG% ^
     -out "bin\amd64\WgSharp-Setup.msi" ^
     "obj\Product.wixobj"
 if %ERRORLEVEL% neq 0 (
@@ -200,6 +214,15 @@ call :sign_file "bin\amd64\WgSharp-Setup.msi"
 
 :after_msi
 
+rem --- Optionally build the standalone/portable zip -------------------
+rem  Packages the SAME WgSharp.exe (not a renamed copy -- mode is decided by
+rem  run location, not filename) plus README and LICENSE into
+rem  WgSharp-<version>-portable.zip. This is the "runs from its own folder"
+rem  distribution; unzipped anywhere outside Program Files it runs portable.
+rem  Override the prompt with PORTABLEZIP=1 (build) or PORTABLEZIP=0 (skip);
+rem  interactive default (Enter) is Yes.
+call :maybe_portable_zip
+
 echo.
 echo [BUILD OK]
 echo   bin\amd64\WgSharp.exe
@@ -209,6 +232,84 @@ echo The background service (Settings -^> "Start with Windows") is the
 echo same exe, started by SCM instead of double-clicked -- no second file.
 popd
 exit /b 0
+
+rem ============================================================
+rem  :decide_wixpdb -- sets SPDB_FLAG to "-spdb" (suppress the .wixpdb) or
+rem  empty (keep it). Honors the WIXPDB env var without prompting, else asks.
+rem  Uses plain expansion only (no enabledelayedexpansion); safe because each
+rem  line in a called subroutine is expanded as it runs.
+rem ============================================================
+:decide_wixpdb
+set "SPDB_FLAG=-spdb"
+if defined WIXPDB (
+    if "%WIXPDB%"=="1" set "SPDB_FLAG="
+    goto :eof
+)
+set "ANSWER="
+set /p "ANSWER=Keep the .wixpdb installer symbol file? [y/N] "
+if /i "%ANSWER%"=="y"   set "SPDB_FLAG="
+if /i "%ANSWER%"=="yes" set "SPDB_FLAG="
+goto :eof
+
+rem ============================================================
+rem  :maybe_portable_zip -- builds WgSharp-<version>-portable.zip in bin\amd64
+rem  from the just-built exe plus README/LICENSE. Honors PORTABLEZIP (1=build,
+rem  0=skip) without prompting, else asks (default Yes). Uses PowerShell's
+rem  Compress-Archive (present on Windows 10+ / Server 2016+); if PowerShell
+rem  isn't available it warns and skips rather than failing the build.
+rem ============================================================
+:maybe_portable_zip
+if not exist "bin\amd64\WgSharp.exe" goto :eof
+
+rem Decide whether to build, using FLAT statements only. A set /p read inside
+rem a parenthesized ( ... ) block is substituted at parse time (before the
+rem read happens) unless enabledelayedexpansion is on -- which this script
+rem forbids -- so the prompt is done at the top level here, never in a block.
+if not defined PORTABLEZIP goto :pz_ask
+if "%PORTABLEZIP%"=="1" goto :pz_build
+goto :eof
+:pz_ask
+set "ANSWER="
+set /p "ANSWER=Build the standalone/portable zip? [Y/n] "
+if /i "%ANSWER%"=="n"  goto :eof
+if /i "%ANSWER%"=="no" goto :eof
+
+:pz_build
+rem Stage exactly what the portable distribution should contain, so the zip
+rem has a clean flat layout (exe + docs) regardless of what else is in
+rem bin\amd64 (the MSI, a .wixpdb, downloaded DLLs, etc.).
+set "PZDIR=obj\portable"
+if exist "%PZDIR%" rmdir /s /q "%PZDIR%"
+mkdir "%PZDIR%" 2>nul
+copy /y "bin\amd64\WgSharp.exe" "%PZDIR%\WgSharp.exe" >nul
+if exist "README.md" copy /y "README.md" "%PZDIR%\README.md" >nul
+if exist "LICENSE"   copy /y "LICENSE"   "%PZDIR%\LICENSE.txt" >nul
+
+set "PZOUT=bin\amd64\WgSharp-%VERSION%-portable.zip"
+if exist "%PZOUT%" del /q "%PZOUT%"
+
+where powershell >nul 2>&1
+if errorlevel 1 goto :pz_nops
+
+rem Build the zip. Errors are shown (not hidden) so a real failure is
+rem diagnosable instead of silently producing nothing.
+echo Creating %PZOUT% ...
+powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Compress-Archive -Path '%CD%\%PZDIR%\*' -DestinationPath '%CD%\%PZOUT%' -Force"
+if errorlevel 1 goto :pz_fail
+if not exist "%PZOUT%" goto :pz_fail
+echo [PORTABLE ZIP OK]
+echo   %PZOUT%
+goto :eof
+
+:pz_nops
+echo [WARN] PowerShell not found -- skipping the portable zip. The staged
+echo        contents are in %PZDIR% if you want to zip them manually.
+goto :eof
+
+:pz_fail
+echo [WARN] Could not create the portable zip. Staged contents are in %PZDIR%.
+echo        Try:  powershell -Command "Compress-Archive -Path '%PZDIR%\*' -DestinationPath '%PZOUT%' -Force"
+goto :eof
 
 rem ============================================================
 rem  Optional Authenticode signing.

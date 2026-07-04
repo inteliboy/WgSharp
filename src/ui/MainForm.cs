@@ -201,6 +201,7 @@ namespace WgSharp.Ui
             _trayMenu = new ContextMenuStrip();
             _trayMenu.Opening += OnTrayMenuOpening;
             notifyIcon.ContextMenuStrip = _trayMenu;
+            notifyIcon.BalloonTipClicked += OnUpdateBalloonClicked;
 
             // Pre-warm the menu-building path once, silently, before the form
             // is shown. The first call into any code is always the slow one
@@ -266,6 +267,8 @@ namespace WgSharp.Ui
                             EnsureBackgroundServiceReady(false); // startup: never auto-launch a UAC prompt
                     }
                 }
+
+                MaybeCheckForUpdates();          // background GitHub check (opt-out via Settings)
             }));
         }
 
@@ -391,62 +394,117 @@ namespace WgSharp.Ui
         // for this run — the offer naturally recurs next launch or on the
         // next activation attempt, because nothing works without the service).
         private bool _setupOffered;
-        // True when running in portable mode WITHOUT elevation. Portable mode
-        // has no background service (by design — a portable copy shouldn't
-        // register anything with the machine), so the app must be elevated to
-        // create the adapter itself. When it isn't, the GUI stays up in a
-        // read-only state: everything is browsable, but Activate is disabled
-        // with a tooltip pointing the user at "Run as administrator." Flips to
-        // false only by relaunching elevated.
-        private bool _portableReadOnly;
 
         // Shows the one-time "please relaunch as administrator" notice for an
         // unelevated portable launch, then puts the UI into read-only mode.
         // Non-fatal and non-blocking beyond the single dialog: the user can
         // keep looking around, import/edit tunnels, and relaunch elevated when
         // they actually want to connect.
+        // Background GitHub update check. Opt-out via Settings. The check is
+        // fully failure-safe (see UpdateChecker) — offline / rate-limited /
+        // parse failure all yield "no update" — so the worst case is silence.
+        private string _updateUrl;
+        private void MaybeCheckForUpdates()
+        {
+            if (!AppSettings.CheckForUpdates) return;
+            try
+            {
+                WgSharp.Core.UpdateChecker.CheckAsync(delegate (WgSharp.Core.UpdateChecker.Result res)
+                {
+                    if (res == null || !res.IsUpdateAvailable) return;
+                    // Marshal back to the UI thread to touch WinForms.
+                    try { BeginInvoke(new Action(delegate { OnUpdateAvailable(res); })); }
+                    catch { /* form closing/closed: ignore */ }
+                });
+            }
+            catch { /* never let the update check disturb startup */ }
+        }
+
+        private void OnUpdateAvailable(WgSharp.Core.UpdateChecker.Result res)
+        {
+            if (IsDisposed || Disposing) return;
+            _updateUrl = res.ReleaseUrl;
+            Log("A newer WgSharp release is available: " + res.LatestVersion +
+                " (you have " + res.CurrentVersion + "). Download: " + res.ReleaseUrl);
+
+            // Non-intrusive nudge: a tray balloon the user can click to open the
+            // release page. No modal dialog — an update is informational, not
+            // something to interrupt the user over.
+            try
+            {
+                if (notifyIcon != null)
+                {
+                    notifyIcon.BalloonTipTitle = "WgSharp update available";
+                    notifyIcon.BalloonTipText = "Version " + res.LatestVersion + " is available (you have " +
+                        res.CurrentVersion + "). Click to open the download page.";
+                    notifyIcon.ShowBalloonTip(10000);
+                }
+            }
+            catch { }
+        }
+
+        private void OnUpdateBalloonClicked(object sender, EventArgs e)
+        {
+            if (string.IsNullOrEmpty(_updateUrl)) return;
+            try { System.Diagnostics.Process.Start(_updateUrl); }
+            catch (Exception ex) { Log(Logger.DebugMarker + "Couldn't open the release page: " + ex.Message); }
+        }
+
         private void NotifyPortableNeedsElevation()
         {
-            _portableReadOnly = true;
-            RefreshActivateEnabled();
-
-            MessageBox.Show(this,
+            var answer = MessageBox.Show(this,
                 "WgSharp is running in portable mode, which needs administrator rights to create the " +
-                "VPN adapter — and, by design, portable mode installs no background service.\r\n\r\n" +
-                "You can browse and edit tunnels now, but to CONNECT you'll need to relaunch WgSharp " +
-                "elevated:\r\n\r\n" +
-                "    Close WgSharp, then right-click WgSharp.exe and choose \"Run as administrator.\"\r\n\r\n" +
-                "(Installing WgSharp normally avoids this — the installed version runs without a prompt " +
-                "and sets up its background service once.)",
-                "WgSharp \u2014 portable mode",
-                MessageBoxButtons.OK, MessageBoxIcon.Information);
+                "VPN adapter (portable mode installs no background service by design).\r\n\r\n" +
+                "Relaunch WgSharp as administrator now?\r\n\r\n" +
+                "\u2022  Yes \u2014 WgSharp closes and reopens with an administrator prompt.\r\n" +
+                "\u2022  No \u2014 WgSharp closes; you can start it again yourself with right-click \u2192 " +
+                "Run as administrator.\r\n\r\n" +
+                "(Installing WgSharp with the MSI avoids this entirely \u2014 the installed version runs " +
+                "without any prompt.)",
+                "WgSharp \u2014 portable mode needs administrator",
+                MessageBoxButtons.YesNo, MessageBoxIcon.Information);
 
-            Log("Portable mode without elevation: connecting is disabled until WgSharp is relaunched " +
-                "as administrator (right-click \u2192 Run as administrator).");
+            if (answer == DialogResult.Yes)
+            {
+                // Relaunch elevated and exit THIS instance, so the user doesn't
+                // have to close the app and right-click the exe by hand. The
+                // single-instance mutex is released as this process exits; the
+                // elevated copy then acquires it cleanly (Program.cs waits
+                // briefly for the handoff).
+                string err;
+                if (WgSharp.Core.Elevation.RelaunchElevated(out err))
+                {
+                    Log("Relaunching as administrator\u2026");
+                    _exitingForElevation = true;
+                    Application.Exit();
+                    return;
+                }
+
+                // Elevation didn't start (most commonly the UAC prompt was
+                // declined). Tell the user how to do it by hand, then close —
+                // portable mode can't do anything useful unelevated, so we
+                // don't leave a dead window open.
+                MessageBox.Show(this,
+                    (err == "cancelled"
+                        ? "The administrator prompt was declined.\r\n\r\n"
+                        : "WgSharp couldn't relaunch itself as administrator (" + err + ").\r\n\r\n") +
+                    "To use portable mode, close WgSharp and start it again with " +
+                    "right-click \u2192 Run as administrator.",
+                    "WgSharp \u2014 administrator required",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+
+            // "No", or the elevation attempt fell through: portable mode is
+            // unusable unelevated, so exit rather than sit in a window that
+            // can't connect. (Installing via the MSI is the prompt-free path.)
+            _exitingForElevation = true;
+            Application.Exit();
         }
 
-        // Enables/disables the Activate button for the current state. In the
-        // portable-read-only case it's disabled with an explanatory tooltip;
-        // otherwise it follows the normal busy/selection rules (the button's
-        // own click path re-checks _busy, so this is just the visible hint).
-        private void RefreshActivateEnabled()
-        {
-            if (btnActivate == null) return;
-            if (_portableReadOnly)
-            {
-                btnActivate.Enabled = false;
-                _activateTip.SetToolTip(btnActivate,
-                    "Portable mode needs administrator rights to connect.\r\n" +
-                    "Relaunch WgSharp with right-click \u2192 Run as administrator.");
-            }
-            else
-            {
-                btnActivate.Enabled = true;
-                _activateTip.SetToolTip(btnActivate, "");
-            }
-        }
-
-        private readonly ToolTip _activateTip = new ToolTip();
+        // Set when we're deliberately exiting to relaunch elevated, so the
+        // form-closing path doesn't treat it as a normal user close (e.g.
+        // minimize-to-tray) and actually lets the process go.
+        private bool _exitingForElevation;
 
         private void EnsureBackgroundServiceReady() { EnsureBackgroundServiceReady(true); }
 
@@ -1015,10 +1073,6 @@ namespace WgSharp.Ui
         {
             bool displayedIsActive = _active && _tunnelName == _activeTunnelName;
             btnActivate.Text = displayedIsActive ? "Deactivate" : "Activate";
-            // Re-apply the portable-read-only disable/tooltip: this runs on
-            // every detail rebuild (tunnel switch), which would otherwise
-            // re-enable the freshly created button.
-            RefreshActivateEnabled();
         }
 
         // Keeps the system tray icon's hover tooltip current with the actually
@@ -1176,7 +1230,7 @@ namespace WgSharp.Ui
         // official client; only the tray menu's Exit item actually quits.
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
-            if (!_exitRequested && e.CloseReason == CloseReason.UserClosing)
+            if (!_exitRequested && !_exitingForElevation && e.CloseReason == CloseReason.UserClosing)
             {
                 e.Cancel = true;
                 Hide();
@@ -1239,20 +1293,6 @@ namespace WgSharp.Ui
 
         private void ActivateTunnel(bool skipUnlock)
         {
-            // Portable + unelevated: no service and no rights to build the
-            // adapter. Re-show the guidance instead of failing deep in driver
-            // init, and leave everything else untouched.
-            if (_portableReadOnly)
-            {
-                Log("Can't connect in portable mode without administrator rights \u2014 relaunch WgSharp " +
-                    "with right-click \u2192 Run as administrator.");
-                MessageBox.Show(this,
-                    "Portable mode needs administrator rights to connect.\r\n\r\n" +
-                    "Close WgSharp, then right-click WgSharp.exe and choose \"Run as administrator.\"",
-                    "WgSharp \u2014 administrator required",
-                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
-            }
             try
             {
                 // In portable mode the stored config is password-encrypted; unlock
@@ -1379,10 +1419,10 @@ namespace WgSharp.Ui
             // not hand its (decrypted) config to a machine-wide service, and
             // shouldn't depend on one that may be a leftover from a prior
             // installed setup. So portable ALWAYS runs in-process, which needs
-            // elevation. _portableReadOnly (set at startup) and the guard in
-            // ActivateTunnel should already have caught the unelevated case;
-            // this is the final backstop. Falls through to the shared start
-            // block below once the backend is chosen.
+            // elevation. An unelevated portable launch already exits at startup
+            // (NotifyPortableNeedsElevation), so reaching here unelevated is a
+            // corner case; this is the final backstop. Falls through to the
+            // shared start block below once the backend is chosen.
             if (AppSettings.PortableMode)
             {
                 if (!WgSharp.Core.Elevation.IsProcessElevated())

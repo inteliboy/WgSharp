@@ -150,11 +150,35 @@
                            EndSessionMessage="yes"
                            ElevatedCloseMessage="yes"
                            TerminateProcess="1"
-                           Timeout="5"
+                           Timeout="15"
                            RebootPrompt="no"
                            Description="WgSharp is running and needs to close before Setup can continue. Setup will close it automatically." />
     <Icon Id="WgSharpIcon" SourceFile="$(var.RepoDir)\WgSharp.ico" />
     <Property Id="ARPPRODUCTICON" Value="WgSharpIcon" />
+
+    <!-- Restart Manager control. Symptom this addresses: on some machines an
+         install/upgrade over a running WgSharp popped the native "Setup was
+         unable to close all running processes" (FilesInUse / RMFilesInUse)
+         dialog, even though the processes WOULD have closed given a moment.
+         Cause: the MSI engine's OWN Restart Manager detection runs early and,
+         when it finds WgSharp.exe (GUI or the service) holding files, shows
+         that dialog itself — BEFORE our util:CloseApplication (which runs in
+         the execute sequence) ever gets its turn, and before the service's
+         several-second tunnel-teardown OnStop can finish. RM was effectively
+         racing our own, more capable shutdown logic and losing.
+
+         MSIRESTARTMANAGERCONTROL=Disable tells the engine NOT to use Restart
+         Manager to close/restart applications on its own. Shutdown is then
+         handled entirely by the two explicit, deterministic mechanisms we
+         already define and control the timing of:
+           * ServiceControl Stop="both" Wait="yes"  -> stops WgSharpSvc and
+             waits for its teardown before files are written; and
+           * util:CloseApplication (Timeout=15, TerminateProcess=1) -> closes
+             the GUI gracefully, then force-terminates if it overruns.
+         This removes the premature dialog while keeping a hard guarantee that
+         the exe is unlocked by file-write time. Secure="yes" so it survives
+         the transition to the (elevated) execute sequence. -->
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" Secure="yes" />
     <Property Id="ARPHELPLINK" Value="https://github.com/inteliboy/WgSharp" />
     <Property Id="ARPNOREPAIR" Value="yes" Secure="yes" />
 

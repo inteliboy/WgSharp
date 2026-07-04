@@ -116,9 +116,22 @@ namespace WgSharp
             {
                 if (!createdNew)
                 {
-                    MessageBox.Show("WgSharp is already running.", "WgSharp",
-                        MessageBoxButtons.OK, MessageBoxIcon.Information);
-                    return;
+                    // Another instance holds the mutex. This is normally a
+                    // genuine "already running", but it's also the brief
+                    // handoff window when a portable copy relaunches itself
+                    // elevated: the old (unelevated) instance is exiting and
+                    // about to release the mutex as its message loop unwinds.
+                    // Wait a short while for it to let go before giving up, so
+                    // the elevated relaunch doesn't bounce off its own parent.
+                    bool acquired = false;
+                    try { acquired = instanceMutex.WaitOne(TimeSpan.FromSeconds(5)); }
+                    catch (System.Threading.AbandonedMutexException) { acquired = true; }
+                    if (!acquired)
+                    {
+                        MessageBox.Show("WgSharp is already running.", "WgSharp",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        return;
+                    }
                 }
                 // "--tray" (set by the login-autostart Run entry) starts the GUI
                 // hidden in the notification area instead of showing its window.

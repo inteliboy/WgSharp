@@ -32,6 +32,7 @@ namespace WgSharp.Core
         public static bool UseWireGuardNt = true;
         public static bool DebugLog;
         public static bool ExperimentalFeatures;
+        public static bool CheckForUpdates = true;   // check GitHub for a newer release at startup
         public static bool StartGuiAtLogin;
         public static bool ServiceWasInstalled;
         public static string TunnelOrder = "";
@@ -127,6 +128,7 @@ namespace WgSharp.Core
                     UseWireGuardNt      = ReadBool(k, "UseWireGuardNt", true);
                     DebugLog            = ReadBool(k, "DebugLog", false);
                     ExperimentalFeatures= ReadBool(k, "ExperimentalFeatures", false);
+                    CheckForUpdates     = ReadBool(k, "CheckForUpdates", true);
                     StartGuiAtLogin     = ReadBool(k, "StartGuiAtLogin", false);
                     ServiceWasInstalled = ReadBool(k, "ServiceWasInstalled", false);
                     TunnelOrder         = ReadString(k, "TunnelOrder", "");
@@ -157,7 +159,7 @@ namespace WgSharp.Core
                 if (found == null) return;
 
                 // Parse the file temporarily into local vars, then write registry.
-                bool wgNt = true, debug = false, exp = false, gui = false, svc = false;
+                bool wgNt = true, debug = false, exp = false, gui = false, svc = false, upd = true;
                 string order = "";
                 foreach (string raw in File.ReadAllLines(found))
                 {
@@ -170,6 +172,7 @@ namespace WgSharp.Core
                     if (key.Equals("UseWireGuardNt", StringComparison.OrdinalIgnoreCase))       wgNt  = ParseBool(val);
                     else if (key.Equals("DebugLog", StringComparison.OrdinalIgnoreCase))         debug = ParseBool(val);
                     else if (key.Equals("ExperimentalFeatures", StringComparison.OrdinalIgnoreCase)) exp = ParseBool(val);
+                    else if (key.Equals("CheckForUpdates", StringComparison.OrdinalIgnoreCase)) upd = ParseBool(val);
                     else if (key.Equals("StartGuiAtLogin", StringComparison.OrdinalIgnoreCase))  gui   = ParseBool(val);
                     else if (key.Equals("ServiceWasInstalled", StringComparison.OrdinalIgnoreCase)) svc = ParseBool(val);
                     else if (key.Equals("TunnelOrder", StringComparison.OrdinalIgnoreCase))      order = val;
@@ -184,6 +187,7 @@ namespace WgSharp.Core
                     k.SetValue("UseWireGuardNt",       wgNt  ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("DebugLog",             debug ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("ExperimentalFeatures", exp   ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("CheckForUpdates",      upd   ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("StartGuiAtLogin",      gui   ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("ServiceWasInstalled",  svc   ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("TunnelOrder",          order,          RegistryValueKind.String);
@@ -227,6 +231,8 @@ namespace WgSharp.Core
                         DebugLog = ParseBool(val);
                     else if (key.Equals("ExperimentalFeatures", StringComparison.OrdinalIgnoreCase))
                         ExperimentalFeatures = ParseBool(val);
+                    else if (key.Equals("CheckForUpdates", StringComparison.OrdinalIgnoreCase))
+                        CheckForUpdates = ParseBool(val);
                     else if (key.Equals("StartGuiAtLogin", StringComparison.OrdinalIgnoreCase))
                         StartGuiAtLogin = ParseBool(val);
                     else if (key.Equals("ServiceWasInstalled", StringComparison.OrdinalIgnoreCase))
@@ -260,6 +266,7 @@ namespace WgSharp.Core
                     k.SetValue("UseWireGuardNt",       UseWireGuardNt       ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("DebugLog",             DebugLog             ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("ExperimentalFeatures", ExperimentalFeatures ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("CheckForUpdates",      CheckForUpdates      ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("StartGuiAtLogin",      StartGuiAtLogin      ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("ServiceWasInstalled",  ServiceWasInstalled  ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("TunnelOrder",          TunnelOrder ?? "",            RegistryValueKind.String);
@@ -282,6 +289,7 @@ namespace WgSharp.Core
                 sb.AppendLine("UseWireGuardNt=" + (UseWireGuardNt ? "true" : "false"));
                 sb.AppendLine("DebugLog=" + (DebugLog ? "true" : "false"));
                 sb.AppendLine("ExperimentalFeatures=" + (ExperimentalFeatures ? "true" : "false"));
+                sb.AppendLine("CheckForUpdates=" + (CheckForUpdates ? "true" : "false"));
                 sb.AppendLine("StartGuiAtLogin=" + (StartGuiAtLogin ? "true" : "false"));
                 sb.AppendLine("ServiceWasInstalled=" + (ServiceWasInstalled ? "true" : "false"));
                 sb.AppendLine("TunnelOrder=" + (TunnelOrder ?? ""));

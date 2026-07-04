@@ -118,7 +118,22 @@ namespace WgSharp.Svc
             LogLine("Service stopping.");
             _stopping = true;
             try { var l = _activeListener; if (l != null) l.Dispose(); } catch { }
-            StopTunnelInternal();
+
+            // Tunnel teardown (adapter removal, route/DNS cleanup, kill-switch
+            // removal) can take several seconds on WireGuardNT. Tell the SCM up
+            // front that we need more than the default stop window, so a slow
+            // teardown is never mistaken for a hung service — and run it on a
+            // worker with a bounded join so, conversely, a teardown that DOES
+            // wedge can't hold the service (and thus an installer waiting on
+            // ServiceControl) open indefinitely. Either way OnStop returns
+            // within a predictable bound.
+            try { RequestAdditionalTime(25000); } catch { }
+
+            var worker = new Thread(StopTunnelInternal) { IsBackground = true, Name = "wgsharpsvc-stop" };
+            worker.Start();
+            if (!worker.Join(20000))
+                LogLine(Logger.DebugMarker + "Tunnel teardown didn't finish within 20s; letting the process exit anyway.");
+
             try { if (_pipeThread != null) _pipeThread.Join(2000); } catch { }
         }
 
