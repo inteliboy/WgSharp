@@ -117,6 +117,13 @@ namespace WgSharp.Core
             try { AdapterConfig.SetMtu(luid, _cfg.Mtu); }
             catch (Exception ex) { Log("MTU setup skipped: " + ex.Message); }
 
+            // Cosmetic: nudge Windows to present the Wintun adapter as connected
+            // so the Network Connections UI shows the assigned IP/DNS (WireGuardNT
+            // gets this for free from its driver's SetAdapterState(UP); Wintun has
+            // no such call). Best-effort — doesn't affect whether traffic flows.
+            try { AdapterConfig.SetInterfaceConnected(luid); }
+            catch (Exception ex) { Log(WgSharp.Core.Logger.DebugMarker + "Interface-connected nudge skipped: " + ex.Message); }
+
             // One shared UDP socket. Its default _peer is the first peer's endpoint
             // (kept for compatibility); per-peer sends use SendTo with each
             // peer's resolved endpoint.

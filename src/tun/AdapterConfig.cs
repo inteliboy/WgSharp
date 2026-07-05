@@ -501,6 +501,50 @@ namespace WgSharp.Tun
         // metric, which can still lose to the physical NIC even after the route
         // itself is added with metric=0. Setting the interface metric explicitly
         // (and turning off "automatic metric") removes that ambiguity.
+        /// <summary>
+        /// Best-effort nudge to get the tunnel interface presented as
+        /// "connected" in the Windows Network Connections / adapter-properties
+        /// UI, so it shows the assigned IP and DNS there.
+        ///
+        /// Background: the WireGuardNT backend calls WireGuardSetAdapterState(UP),
+        /// a driver call that flips the miniport's media-connect state to
+        /// connected — which is what makes Windows' settings UI populate the
+        /// IP/DNS fields. Wintun (a bare userspace TUN) has no equivalent
+        /// "adapter up" API; its media-connect state is owned by the driver and
+        /// tracks its active session. The addressing IS applied to the LUID
+        /// either way (routing and DNS work) — the blank UI fields are purely a
+        /// presentation artifact of the interface reading as not-fully-connected.
+        ///
+        /// Honest limitation: MIB_IF_ROW2.MediaConnectState is READ-ONLY
+        /// (SetIfEntry2 only lets you write AdminStatus), so nothing in user
+        /// space can force the media state the way the WireGuardNT driver does
+        /// for itself. What we CAN do is re-assert the interface as
+        /// administratively enabled, which makes Windows re-evaluate and often
+        /// refresh the adapter's shown state once the Wintun session is
+        /// reporting connected. So this helps on many setups but isn't
+        /// guaranteed, and it's cosmetic only — it never affects whether
+        /// traffic flows. Any failure is logged (debug) and ignored.
+        /// </summary>
+        public static void SetInterfaceConnected(ulong luid)
+        {
+            uint idx;
+            try { idx = LuidToIndex(luid); }
+            catch (Exception ex) { L(WgSharp.Core.Logger.DebugMarker + "Could not resolve interface index to mark connected: " + ex.Message); return; }
+
+            // admin=enabled is idempotent (the adapter is already enabled) but
+            // re-issuing it makes Windows re-evaluate and refresh the adapter's
+            // shown state, which is what pulls the IP/DNS into the UI.
+            try
+            {
+                RunNetsh("interface set interface " + idx + " admin=enabled");
+                L(WgSharp.Core.Logger.DebugMarker + "Tunnel interface marked enabled/connected (if " + idx + ").");
+            }
+            catch (Exception ex)
+            {
+                L(WgSharp.Core.Logger.DebugMarker + "Marking interface connected failed (cosmetic only): " + ex.Message);
+            }
+        }
+
         public static void SetInterfaceMetric(ulong luid, int metric)
         {
             uint idx;
