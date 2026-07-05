@@ -78,8 +78,32 @@ namespace WgSharp.Core
                 r.LatestVersion = latestTag;
                 r.ReleaseUrl = TagUrlPrefix + latestTag;
 
-                if (CompareVersions(latestTag, r.CurrentVersion) > 0)
+                int cmp = CompareVersions(latestTag, r.CurrentVersion);
+                if (cmp > 0)
+                {
+                    // Release version is clearly newer.
                     r.IsUpdateAvailable = true;
+                }
+                else if (cmp == 0)
+                {
+                    // Same version. This is the same-day re-release case: the
+                    // tag wasn't bumped, so versions can't distinguish them.
+                    // Fall back to comparing timestamps — the release's newest
+                    // asset upload vs this build's stamped time. Only counts if
+                    // the asset is meaningfully newer (a margin absorbs
+                    // build-machine vs GitHub clock skew and avoids nagging on a
+                    // release that was merely edited around the same time).
+                    DateTime assetTime, buildTime;
+                    if (TryGetLatestAssetTime(json, out assetTime) &&
+                        TryGetBuildTimestamp(out buildTime))
+                    {
+                        if (assetTime.ToUniversalTime() - buildTime.ToUniversalTime() > TimestampMargin)
+                            r.IsUpdateAvailable = true;
+                    }
+                    // No usable timestamps -> treat equal versions as up to date
+                    // (the old behavior), never a false prompt.
+                }
+                // cmp < 0: running build is newer than the release; no update.
             }
             catch
             {
@@ -91,8 +115,90 @@ namespace WgSharp.Core
         }
 
         /// <summary>
-        /// The running build's version as major.YY.MMDD (the 4th ".0" field of
-        /// the assembly version is stripped so it lines up with the release tag
+        /// How much newer the release's asset must be than this build before the
+        /// same-version tiebreaker counts it as an update. Absorbs clock skew
+        /// between the build machine and GitHub, and avoids nagging when a
+        /// release is edited/re-saved around the same time as the build.
+        /// </summary>
+        private static readonly TimeSpan TimestampMargin = TimeSpan.FromMinutes(5);
+
+        /// <summary>
+        /// Reads the build timestamp stamped into the exe at build time
+        /// (AssemblyMetadata "BuildTimestamp", ISO-8601 UTC). Returns false if
+        /// absent or unparseable (e.g. a dev build with no stamp) — the caller
+        /// then simply skips the timestamp tiebreaker.
+        /// </summary>
+        public static bool TryGetBuildTimestamp(out DateTime utc)
+        {
+            utc = DateTime.MinValue;
+            try
+            {
+                object[] attrs = Assembly.GetExecutingAssembly()
+                    .GetCustomAttributes(typeof(AssemblyMetadataAttribute), false);
+                foreach (object a in attrs)
+                {
+                    var m = a as AssemblyMetadataAttribute;
+                    if (m != null && m.Key == "BuildTimestamp" && !string.IsNullOrEmpty(m.Value))
+                    {
+                        return DateTime.TryParse(m.Value,
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            System.Globalization.DateTimeStyles.AdjustToUniversal |
+                            System.Globalization.DateTimeStyles.AssumeUniversal, out utc);
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        /// <summary>
+        /// Finds the most recent asset upload time in the releases/latest JSON
+        /// by scanning every "updated_at" that appears inside the "assets"
+        /// array and taking the max. Falling back to the release-level
+        /// "published_at" would nag on note-only edits, so we deliberately use
+        /// only the asset timestamps (a re-uploaded binary is what should
+        /// trigger this). Returns false if there are no assets/timestamps.
+        /// </summary>
+        public static bool TryGetLatestAssetTime(string json, out DateTime utc)
+        {
+            utc = DateTime.MinValue;
+            if (string.IsNullOrEmpty(json)) return false;
+
+            // Narrow to the "assets": [ ... ] array so we don't accidentally
+            // pick up the release-level published_at/created_at/updated_at.
+            int ai = json.IndexOf("\"assets\"", StringComparison.Ordinal);
+            if (ai < 0) return false;
+            int lb = json.IndexOf('[', ai);
+            if (lb < 0) return false;
+            int depth = 0, end = -1;
+            for (int i = lb; i < json.Length; i++)
+            {
+                char c = json[i];
+                if (c == '[') depth++;
+                else if (c == ']') { depth--; if (depth == 0) { end = i; break; } }
+            }
+            if (end < 0) end = json.Length;
+            string assets = json.Substring(lb, end - lb);
+
+            bool found = false;
+            foreach (Match m in Regex.Matches(assets, "\"updated_at\"\\s*:\\s*\"([^\"]+)\""))
+            {
+                DateTime t;
+                if (DateTime.TryParse(m.Groups[1].Value,
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.AdjustToUniversal |
+                        System.Globalization.DateTimeStyles.AssumeUniversal, out t))
+                {
+                    if (!found || t > utc) { utc = t; found = true; }
+                }
+            }
+            return found;
+        }
+
+        /// <summary>
+        /// The running build's version as major.YY.MMDD.REV (kept to 4 fields
+        /// so a same-day revision tag like 1.YY.MMDD.1 compares as newer than
+        /// the assembly version stripped so it lines up with the release tag
         /// format). Falls back to the assembly version, then "0".
         /// </summary>
         public static string CurrentVersion()
