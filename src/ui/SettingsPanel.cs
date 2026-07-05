@@ -33,6 +33,7 @@ namespace WgSharp.Ui
             Dock = DockStyle.Fill;
             BackColor = AppTheme.PanelBg;
             Padding = new Padding(10);
+            AutoScroll = true;   // never clip the last item when the window is short
 
             _portable = new CheckBox
             {
@@ -184,6 +185,29 @@ namespace WgSharp.Ui
             Controls.Add(experimentalHelp);
             Controls.Add(_checkUpdates);
             Controls.Add(checkUpdatesHelp);
+
+            // Make every description label span to the right edge and word-wrap
+            // instead of being clipped at a fixed 450px width. The help labels
+            // are the ones indented under their checkbox (x == 36); anchoring
+            // them Left|Right lets them grow/shrink with the window, and with
+            // AutoSize off a Label wraps its text to the available width. We
+            // deliberately DON'T force a taller height here: each label keeps
+            // the height it was created with (already sized for its text at a
+            // normal window width), so widening never makes a label overlap the
+            // next checkbox below it. On a narrow window the wider labels wrap
+            // to more lines; AutoScroll (set above) ensures nothing is cut off
+            // vertically. Done in one pass so it stays correct as options are
+            // added, rather than hand-tuning each label's Size.
+            foreach (Control c in Controls)
+            {
+                Label lbl = c as Label;
+                if (lbl == null || lbl.Location.X != 36) continue;
+                lbl.AutoSize = false;
+                lbl.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+                const int rightPad = 16;
+                int w = ClientSize.Width - lbl.Location.X - rightPad;
+                if (w > lbl.Width) lbl.Width = w; // only ever widen from the design width
+            }
         }
 
         public void LoadFromSettings()

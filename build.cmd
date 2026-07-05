@@ -77,21 +77,20 @@ rem ONE date-encoding, used in two forms (MSI's ProductVersion format is
 rem fundamentally 3-field only -- "major.minor.build" -- WiX rejects a 4th
 rem field there outright, so a single identical string for both isn't
 rem possible; this is as unified as Windows Installer allows):
-rem   - VERSION       = 1.YY.MMDD     (3 fields) -- used for the MSI's
-rem                     ProductVersion, since that field cannot hold a 4th
-rem                     part at all.
-rem   - VERSION_ASSEMBLY = 1.YY.MMDD.0 (4 fields) -- used for the exe's
-rem                     AssemblyVersion/AssemblyFileVersion/
-rem                     AssemblyInformationalVersion, which all support (and
-rem                     in .NET's case, the first two REQUIRE) 4 parts. The
-rem                     trailing ".0" is a fixed placeholder revision field
-rem                     (there's never more than one build per day from this
-rem                     script, so it's always 0) -- present purely so the
-rem                     format is uniform and explicit, not because it ever
-rem                     varies.
-rem Either way, the same YY/MM/DD digits are what's actually meaningful, and
-rem VERSION is exactly the leading 3 fields of VERSION_ASSEMBLY -- the
-rem closest thing to "one standard" achievable given the MSI constraint.
+rem   - VERSION       = 1.YY.MMDD     (3 fields) -- the MSI's ProductVersion
+rem                     and the release tag / portable-zip name.
+rem   - VERSION_ASSEMBLY = 1.YY.MMDD.0 (4 fields) -- the exe's AssemblyVersion/
+rem                     AssemblyFileVersion/AssemblyInformationalVersion. The
+rem                     trailing ".0" is a fixed placeholder revision field.
+rem
+rem Same-day RE-release: nothing here changes. Just tag the new GitHub release
+rem 1.YY.MMDD.1 (then .2, ...) -- the in-app update check compares four fields,
+rem so 1.26.0704.1 > the installed exe's 1.26.0704.0 and the newer tag is
+rem detected. The exe and MSI don't need a distinct version for that; the tag
+rem alone carries the revision. (Release tags are immutable by convention --
+rem never reuse a tag for a different binary.)
+rem The same YY/MM/DD digits are what's actually meaningful, and VERSION is
+rem exactly the leading 3 fields of VERSION_ASSEMBLY.
 set MM=
 set DD=
 set YY=

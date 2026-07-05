@@ -118,16 +118,20 @@ namespace WgSharp.Core
             return "0";
         }
 
-        // Trims to the numeric major.minor.build core and drops any 4th field
-        // and any suffix (e.g. "1.26.0704.0" -> "1.26.0704", "1.26.0704-rc" ->
-        // "1.26.0704"). Returns "" if nothing numeric is found.
+        // Trims to the numeric version core, keeping up to FOUR dotted fields
+        // (major.YY.MMDD and an optional same-day revision), and drops any
+        // suffix (e.g. "1.26.0704-rc" -> "1.26.0704", "1.26.0704.1-beta" ->
+        // "1.26.0704.1"). Four fields matter because releases are normally
+        // tagged major.YY.MMDD, but a second build on the same day is tagged
+        // major.YY.MMDD.N so it still compares as newer. Returns "" if nothing
+        // numeric is found.
         private static string NormalizeVersion(string v)
         {
             if (string.IsNullOrEmpty(v)) return "";
             Match m = Regex.Match(v, @"\d+(?:\.\d+){1,3}");
             if (!m.Success) return "";
             string[] parts = m.Value.Split('.');
-            int take = Math.Min(3, parts.Length);
+            int take = Math.Min(4, parts.Length);
             return string.Join(".", parts, 0, take);
         }
 

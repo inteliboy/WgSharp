@@ -1173,6 +1173,10 @@ namespace WgSharp.Ui
             logItem.Click += delegate { ShowMainWindow(); tabs.SelectedIndex = 3; };
             _trayMenu.Items.Add(logItem);
 
+            var updatesItem = new ToolStripMenuItem("Check for Updates");
+            updatesItem.Click += delegate { CheckForUpdatesFromTray(); };
+            _trayMenu.Items.Add(updatesItem);
+
             var aboutItem = new ToolStripMenuItem("About");
             aboutItem.Click += delegate { using (var dlg = new AboutDialog()) dlg.ShowDialog(); };
             _trayMenu.Items.Add(aboutItem);
@@ -1187,6 +1191,19 @@ namespace WgSharp.Ui
             var exitItem = new ToolStripMenuItem("Exit");
             exitItem.Click += delegate { _exitRequested = true; Close(); };
             _trayMenu.Items.Add(exitItem);
+        }
+
+        // Tray "Check for Updates": like the About button, but marshals result
+        // reporting through this form (the tray callback runs on a thread-pool
+        // thread, and MessageBox should be shown from the UI thread with a
+        // proper owner).
+        private void CheckForUpdatesFromTray()
+        {
+            WgSharp.Core.UpdateChecker.CheckAsync(delegate (WgSharp.Core.UpdateChecker.Result res)
+            {
+                try { BeginInvoke(new Action(delegate { AboutDialog.ShowUpdateResult(this, res); })); }
+                catch { /* form closing/closed */ }
+            });
         }
 
         // Switches directly to the clicked tunnel (matching the official

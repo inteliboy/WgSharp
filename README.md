@@ -67,9 +67,9 @@ transport data path. A WinForms GUI. All compiled with `csc.exe` alone —
 | 📊 **Live stats** | Upload/download charts, session duration, total transferred, and tunnel latency. |
 | ✍️ **Config editor** | Syntax highlighting, a live-derived public key, and QR export. |
 | 📷 **Scan from QR code** *(experimental)* | Add a tunnel by pointing the webcam at a QR code (or scanning a saved image) — a from-scratch QR decoder, no external library. Enabled via **Settings → Show experimental features**. |
-| 🔔 **Update notifications** | Quietly checks GitHub at startup for a newer release and shows a clickable tray notification if one exists — informational only, never auto-downloads. Opt out via **Settings → Check for updates**. |
+| 🔔 **Update notifications** | Quietly checks GitHub at startup for a newer release and shows a clickable tray notification if one exists; you can also check on demand from the **About** dialog or the tray menu. Informational only — never auto-downloads. Opt out of the startup check via **Settings → Check for updates**. |
 | 🧰 **System tray** | Live status tooltip, quick-connect menu, closing the window minimizes instead of exiting. |
-| ℹ️ **About dialog** | Version, GitHub link, and Buy Me a Coffee support link — accessible from the window's system menu. |
+| ℹ️ **About dialog** | Version, GitHub link, Buy Me a Coffee support link, and a **Check for Updates** button — reachable from the window's system menu and the tray menu. |
 
 ## Screenshots
 
@@ -109,15 +109,21 @@ There isn't one identical version string used absolutely everywhere, because
 Windows Installer's `ProductVersion` field is a hard wall: it's strictly
 3-part (`major.minor.build`) and WiX rejects a 4th field outright, while
 .NET's `AssemblyVersion`/`AssemblyFileVersion` are 4-part. So `build.cmd`
-computes ONE date encoding and uses it in both of the only two forms Windows
-actually allows:
+computes ONE date encoding and uses it in the two forms Windows allows:
 
+- **`1.YY.MMDD`** (3 fields) for the MSI's `ProductVersion` and the release
+  tag / portable-zip name.
 - **`1.YY.MMDD.0`** (4 fields) for the exe's `AssemblyVersion`,
   `AssemblyFileVersion`, and `AssemblyInformationalVersion` — e.g.
   `1.26.0629.0` for 2026-06-29. The trailing `.0` is a fixed placeholder
-  revision field (there's only ever one build per day from this script).
-- **`1.YY.MMDD`** (3 fields — exactly the first 3 fields of the line above)
-  for the MSI's `ProductVersion`.
+  revision field.
+
+**Same-day re-releases** need nothing in the build: just tag the new GitHub
+release `1.YY.MMDD.1` (then `.2`, ...). The in-app update check compares four
+version fields, so `1.26.0704.1` is newer than the installed exe's
+`1.26.0704.0` and the newer tag is detected — the exe and MSI don't need a
+distinct version, the tag alone carries the revision. (Release tags are
+immutable by convention; never reuse a tag for a different binary.)
 
 Neither can hold a 4-digit year (both pack versions into fixed-width numeric
 fields), so the year is shortened to its last two digits (`YY`, good until
@@ -376,12 +382,23 @@ PersistentKeepalive = 25
 | Throughput | Good — CNG; higher than pure managed | Higher — kernel data path |
 | Adapter | Wintun | WireGuardNT's own miniport |
 | AWG support | ✅ (always managed for AWG configs) | ❌ (driver can't speak AWG framing) |
+| Shows IP/DNS in the Windows network UI | Best-effort (Wintun has no driver "connected" state; WgSharp nudges it, but Windows may still show the fields blank) | ✅ (the driver reports the adapter as connected) |
 
 Switch between them in **Settings → Use WireGuardNT (kernel) backend**. Each
 backend uses its own deterministic adapter identity, so switching back and
 forth doesn't confuse Windows' network-profile matching. If a previous run of
 the WireGuardNT backend didn't shut down cleanly, it automatically recovers by
 opening the existing adapter instead of requiring a reboot.
+
+One cosmetic difference: on the managed/Wintun backend, Windows' Network
+Connections list and the adapter properties page may show the IP and DNS
+fields blank even while the tunnel is fully working. That's because Wintun (a
+bare userspace TUN driver) has no "set adapter connected" API the way
+WireGuardNT does; the address and DNS *are* assigned to the interface and
+routing/resolution work identically either way — only the settings UI's
+presentation differs. WgSharp nudges Windows to refresh the adapter's state,
+but on some Windows versions the fields can still read blank. If seeing the
+details there matters to you, use the WireGuardNT backend.
 
 ## AmneziaWG (censorship-resistance obfuscation)
 

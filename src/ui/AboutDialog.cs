@@ -154,6 +154,14 @@ namespace WgSharp.Ui
                 Location = new Point(ClientSize.Width - 108, ClientSize.Height - 40)
             };
 
+            var btnCheckUpdates = new Button
+            {
+                Text = "Check for Updates",
+                Size = new Size(140, 28),
+                Location = new Point(20, ClientSize.Height - 40)
+            };
+            btnCheckUpdates.Click += delegate { CheckForUpdatesInteractive(btnCheckUpdates); };
+
             Controls.Add(iconBox);
             Controls.Add(title);
             Controls.Add(subtitle);
@@ -163,10 +171,79 @@ namespace WgSharp.Ui
             Controls.Add(link);
             Controls.Add(coffeeLabel);
             Controls.Add(coffeeLink);
+            Controls.Add(btnCheckUpdates);
             Controls.Add(btnClose);
 
             AcceptButton = btnClose;
             CancelButton = btnClose;
+        }
+
+        /// <summary>
+        /// Runs an update check triggered by the user (About dialog / tray menu),
+        /// so unlike the silent startup check this always reports an outcome —
+        /// up to date, a newer version (with an offer to open the page), or a
+        /// check failure. Runs the network call on a background thread and
+        /// re-enables the button + shows the result on the UI thread. Static so
+        /// the tray menu can reuse it without an About dialog instance.
+        /// </summary>
+        public static void CheckForUpdatesInteractive(Button trigger)
+        {
+            IWin32Window owner = trigger != null ? trigger.FindForm() : null;
+            if (trigger != null) { trigger.Enabled = false; trigger.Text = "Checking\u2026"; }
+
+            WgSharp.Core.UpdateChecker.CheckAsync(delegate (WgSharp.Core.UpdateChecker.Result res)
+            {
+                Action show = delegate
+                {
+                    if (trigger != null && !trigger.IsDisposed) { trigger.Enabled = true; trigger.Text = "Check for Updates"; }
+                    ShowUpdateResult(owner, res);
+                };
+                // Marshal to the UI thread if we have a control to marshal on.
+                try
+                {
+                    Control c = trigger;
+                    if (c != null && c.IsHandleCreated && c.InvokeRequired) c.BeginInvoke(show);
+                    else show();
+                }
+                catch { try { show(); } catch { } }
+            });
+        }
+
+        /// <summary>Shows the outcome of an interactive update check (public so the tray menu can reuse it).</summary>
+        public static void ShowUpdateResult(IWin32Window owner, WgSharp.Core.UpdateChecker.Result res)
+        {
+            if (res == null)
+            {
+                MessageBox.Show(owner, "Couldn't check for updates right now. Please try again later.",
+                    "WgSharp", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            if (res.IsUpdateAvailable)
+            {
+                var answer = MessageBox.Show(owner,
+                    "A newer version is available.\r\n\r\n" +
+                    "You have " + res.CurrentVersion + "; the latest is " + res.LatestVersion + ".\r\n\r\n" +
+                    "Open the download page now?",
+                    "WgSharp \u2014 update available",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+                if (answer == DialogResult.Yes)
+                {
+                    try { Process.Start(res.ReleaseUrl); } catch { }
+                }
+                return;
+            }
+
+            // No update. Distinguish "confirmed up to date" from "couldn't
+            // reach GitHub": LatestVersion is only set when the API answered.
+            if (!string.IsNullOrEmpty(res.LatestVersion))
+                MessageBox.Show(owner,
+                    "You're up to date.\r\n\r\nWgSharp " + res.CurrentVersion + " is the latest version.",
+                    "WgSharp", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            else
+                MessageBox.Show(owner,
+                    "Couldn't reach GitHub to check for updates. Please check your connection and try again.",
+                    "WgSharp", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         /// <summary>
