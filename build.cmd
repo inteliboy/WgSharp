@@ -79,20 +79,14 @@ rem field there outright, so a single identical string for both isn't
 rem possible; this is as unified as Windows Installer allows):
 rem   - VERSION       = 1.YY.MMDD     (3 fields) -- the MSI's ProductVersion
 rem                     and the release tag / portable-zip name.
-rem   - VERSION_ASSEMBLY = 1.YY.MMDD.REV (4 fields) -- the exe's AssemblyVersion/
-rem                     AssemblyFileVersion/AssemblyInformationalVersion. REV
-rem                     is 0 for the normal one-build-per-day case.
+rem   - VERSION_ASSEMBLY = 1.YY.MMDD.0 (4 fields) -- the exe's AssemblyVersion/
+rem                     AssemblyFileVersion/AssemblyInformationalVersion. The
+rem                     trailing ".0" is a fixed placeholder revision field.
 rem
-rem Same-day RE-release is handled AUTOMATICALLY by a build timestamp stamped
-rem into the exe (see BUILD_TS below): when the tag and the running build are
-rem the same version, the update check compares the release asset's upload time
-rem against that stamp (5-min margin), so a re-uploaded same-tag build is seen
-rem as an update without any manual step. Setting REV (below) is an OPTIONAL
-rem way to give a same-day re-release an explicit distinct version instead.
-rem Only the exe's 4th field changes; VERSION (MSI ProductVersion + tag/zip
-rem display) stays 1.YY.MMDD.
-rem The same YY/MM/DD digits are what's actually meaningful, and VERSION is
-rem exactly the leading 3 fields of VERSION_ASSEMBLY.
+rem The in-app update check compares this against the GitHub release tag
+rem (also 1.YY.MMDD), so releasing at most once per calendar day keeps the
+rem comparison unambiguous. The same YY/MM/DD digits are what's actually
+rem meaningful, and VERSION is exactly the leading 3 fields of VERSION_ASSEMBLY.
 set MM=
 set DD=
 set YY=
@@ -107,30 +101,8 @@ if not defined YY (
     set DD=00
     set YY=00
 )
-
-rem Precise UTC build timestamp (ISO-8601, e.g. 2026-07-05T14:03:22Z), stamped
-rem into the exe so the in-app update check can use it as a TIEBREAKER when the
-rem version compares equal (a same-day re-release without a REV/tag bump): the
-rem GitHub asset's updated_at being meaningfully newer than this means a newer
-rem build exists. Best-effort; empty on failure (the check then just skips the
-rem tiebreaker and relies on version comparison alone).
-set BUILD_TS=
-for /f "usebackq delims=" %%t in (`powershell -NoProfile -NonInteractive -Command "[DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')"`) do set BUILD_TS=%%t
 set VERSION=1.%YY%.%MM%%DD%
-rem Exe revision. The exe's 4th field is what the in-app update check reads and
-rem compares against the GitHub release tag. Normally it's 0 (one build/day).
-rem For a SECOND release on the same calendar day, set REV=1 (then 2, ...)
-rem before running build.cmd AND tag that GitHub release 1.YY.MMDD.REV to match:
-rem the installed app then reports 1.YY.MMDD.REV and won't false-prompt itself
-rem as out of date against its own tag. Only the exe stamp changes; VERSION
-rem (the MSI ProductVersion and the friendly/tag display) stays 1.YY.MMDD.
-rem   Note: because the MSI ProductVersion is unchanged, re-running the same-day
-rem   MSI over a prior same-day install is a repair, not an upgrade -- fine
-rem   here, since only the running app checks for updates (it sends people to
-rem   the download page; they install the new build fresh). The MSI installer
-rem   itself never checks for updates.
-if not defined REV set REV=0
-set VERSION_ASSEMBLY=%VERSION%.%REV%
+set VERSION_ASSEMBLY=%VERSION%.0
 echo Version stamp: %VERSION_ASSEMBLY% ^(exe^) / %VERSION% ^(MSI/tag^)
 
 > "src\core\AssemblyInfo.generated.cs" (
@@ -140,7 +112,6 @@ echo Version stamp: %VERSION_ASSEMBLY% ^(exe^) / %VERSION% ^(MSI/tag^)
     echo [assembly: AssemblyVersion^("%VERSION_ASSEMBLY%"^)]
     echo [assembly: AssemblyFileVersion^("%VERSION_ASSEMBLY%"^)]
     echo [assembly: AssemblyInformationalVersion^("%VERSION_ASSEMBLY%"^)]
-    echo [assembly: AssemblyMetadata^("BuildTimestamp", "%BUILD_TS%"^)]
     echo [assembly: AssemblyProduct^("WgSharp"^)]
     echo [assembly: AssemblyTitle^("WgSharp"^)]
     echo [assembly: AssemblyDescription^("A from-scratch WireGuard client for Windows"^)]

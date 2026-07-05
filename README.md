@@ -118,32 +118,13 @@ computes ONE date encoding and uses it in the two forms Windows allows:
   `1.26.0629.0` for 2026-06-29. The trailing `.0` is a fixed placeholder
   revision field.
 
-**Same-day re-releases** are handled automatically, with no build flags or
-version bumps to remember. Every build also stamps a precise UTC build time
-into the exe (an `AssemblyMetadata("BuildTimestamp", ...)` attribute). The
-update check compares versions first; only when the release tag and the running
-build are the *same* version does it fall back to comparing timestamps — the
-newest release **asset**'s `updated_at` against the build time, with a 5-minute
-margin to absorb clock skew. So if you re-upload the MSI/zip to the same
-`1.YY.MMDD` tag later in the day, users on the earlier build see it as an
-update, while your own freshly built copy (whose build time matches its assets)
-does not get a false prompt. It uses the asset upload time specifically, not the
-release's `published_at`, so merely editing the release notes doesn't nag
-anyone. If the timestamps can't be read (a dev build with no stamp, or a
-release with no assets), it simply falls back to version comparison and reports
-"up to date" — never a false prompt.
-
-If you *do* still want an explicit, unambiguous version for a same-day
-re-release (so it shows a distinct number rather than relying on timestamps),
-you can set `REV=1` (then `2`, ...) before running `build.cmd` and tag the
-release `1.YY.MMDD.1` to match: `REV` stamps the exe's 4th field, and the
-four-field version comparison then detects it directly. This is optional — the
-timestamp tiebreaker covers the common case on its own. Either way `VERSION`
-(the MSI `ProductVersion` and the tag/display) stays `1.YY.MMDD`, and since only
-the running app checks for updates (never the MSI installer), a same-`ProductVersion`
-MSI re-run is just a repair. (Release tags are immutable by convention; never
-reuse a tag for a *different* binary — but re-uploading the same build's assets,
-or bumping to `.1`, is exactly what this supports.)
+The in-app update check compares the exe's version (normalized to `1.YY.MMDD`)
+against the latest GitHub release tag. This assumes **at most one release per
+calendar day**: since the version has day granularity, two different builds
+released on the same day would carry the same version and couldn't be told
+apart. Releasing once a day keeps the comparison unambiguous — a newer date is
+newer, an equal date is up to date. (Release tags are immutable by convention;
+never reuse a tag for a different binary.)
 
 Neither can hold a 4-digit year (both pack versions into fixed-width numeric
 fields), so the year is shortened to its last two digits (`YY`, good until
