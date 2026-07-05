@@ -115,7 +115,7 @@ namespace WgSharp.Ui
 
             var link = new LinkLabel
             {
-                Text = "https://github.com/inteliboy/WgSharp",
+                Text = "github.com/inteliboy/WgSharp",
                 Location = new Point(20 + copyrightW, 308),
                 AutoSize = true
             };

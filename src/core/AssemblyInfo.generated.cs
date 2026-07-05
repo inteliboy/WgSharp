@@ -4,7 +4,7 @@ using System.Reflection;
 [assembly: AssemblyVersion("1.26.0705.0")]
 [assembly: AssemblyFileVersion("1.26.0705.0")]
 [assembly: AssemblyInformationalVersion("1.26.0705.0")]
-[assembly: AssemblyMetadata("BuildTimestamp", "2026-07-05T13:03:41Z")]
+[assembly: AssemblyMetadata("BuildTimestamp", "2026-07-05T13:35:50Z")]
 [assembly: AssemblyProduct("WgSharp")]
 [assembly: AssemblyTitle("WgSharp")]
 [assembly: AssemblyDescription("A from-scratch WireGuard client for Windows")]
