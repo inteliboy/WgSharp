@@ -816,6 +816,10 @@ namespace WgSharp.Ui
             catch (Exception ex) { Log("Setup check failed: " + ex.Message); }
         }
 
+        // Appends a line that already carries its own timestamp (forwarded from
+        // the background service's in-memory log via ServiceLogPump), so we
+        // don't prepend a second timestamp the way Log does. Verbosity is
+        // already filtered service-side, so these are shown as-is.
         private void LogRaw(string line)
         {
             if (line == null) return;
