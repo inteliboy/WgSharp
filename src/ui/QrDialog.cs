@@ -30,7 +30,17 @@ namespace WgSharp.Ui
             MinimizeBox = false;
             ShowInTaskbar = false;
             ClientSize = new Size(360, 436);
+            // Content area stays white intentionally regardless of app theme -
+            // a QR code needs a white quiet zone to scan reliably. Only the
+            // window chrome (title bar) follows the theme.
             BackColor = Color.White;
+            HandleCreated += delegate
+            {
+                NativeMethods.SetDarkTitleBar(Handle, AppTheme.IsDark);
+                NativeMethods.SetBorderAndCaptionColor(Handle,
+                    AppTheme.IsDark ? AppTheme.Border : Color.Empty,
+                    AppTheme.IsDark ? AppTheme.Surface : Color.Empty);
+            };
 
             var pic = new PictureBox
             {

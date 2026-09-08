@@ -11,7 +11,6 @@ namespace WgSharp.Ui
     /// </summary>
     internal static class FieldGrid
     {
-        public static readonly Color LabelColor = Color.FromArgb(0x55, 0x55, 0x55);
         public static readonly Font LabelFont = new Font("Segoe UI", 9F);
         public static readonly Font ValueFont = new Font("Segoe UI", 9F);
 

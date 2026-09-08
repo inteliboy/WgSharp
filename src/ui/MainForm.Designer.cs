@@ -16,6 +16,7 @@ namespace WgSharp.Ui
         // Tunnels tab
         private SplitContainer split;
         private ListBox lstTunnels;            // left: tunnel list (owner-drawn for shield)
+        private Panel lstTunnelsBorder;        // themed 1px border wrapper (native FixedSingle ignores theme)
         private Panel pnlButtons;              // bottom-left action row
         private Button btnAddTunnel;
         private Button btnDelete;
@@ -23,8 +24,8 @@ namespace WgSharp.Ui
         private Button btnQr;
 
         private Panel pnlDetail;               // right: scrollable detail
-        private GroupBox grpInterface;
-        private GroupBox grpPeer;
+        private ThemedGroupBox grpInterface;
+        private ThemedGroupBox grpPeer;
         private Button btnActivate;            // Activate/Deactivate toggle
         private Button btnEdit;
 
@@ -57,8 +58,8 @@ namespace WgSharp.Ui
             this.btnDelete = new Button();
             this.btnExport = new Button();
             this.pnlDetail = new Panel();
-            this.grpInterface = new GroupBox();
-            this.grpPeer = new GroupBox();
+            this.grpInterface = new ThemedGroupBox();
+            this.grpPeer = new ThemedGroupBox();
             this.btnActivate = new Button();
             this.btnEdit = new Button();
             this.txtLog = new TextBox();
@@ -66,6 +67,12 @@ namespace WgSharp.Ui
 
             // ---- tabs ----
             this.tabs.Dock = DockStyle.Fill;
+            // Native TabControl always paints its tab strip via visual styles
+            // (light, regardless of BackColor) - owner-draw + the overlay
+            // panels built in BuildTabOverlays() cover this.
+            this.tabs.Appearance = TabAppearance.FlatButtons;
+            this.tabs.DrawMode = TabDrawMode.OwnerDrawFixed;
+            this.tabs.DrawItem += new DrawItemEventHandler(this.DrawTab);
             this.tabs.Controls.Add(this.tabTunnels);
             this.tabs.Controls.Add(this.tabStats);
             this.tabs.Controls.Add(this.tabSettings);
@@ -98,7 +105,6 @@ namespace WgSharp.Ui
 
             // ---- left: tunnel list ----
             this.lstTunnels.Dock = DockStyle.Fill;
-            this.lstTunnels.BorderStyle = BorderStyle.FixedSingle;
             this.lstTunnels.IntegralHeight = false;
             this.lstTunnels.DrawMode = DrawMode.OwnerDrawFixed;
             this.lstTunnels.ItemHeight = 28;
@@ -112,29 +118,40 @@ namespace WgSharp.Ui
             this.lstTunnels.MouseDown += new MouseEventHandler(this.OnTunnelListMouseDown);
             this.lstTunnels.MouseMove += new MouseEventHandler(this.OnTunnelListMouseMove);
             this.lstTunnels.MouseUp += new MouseEventHandler(this.OnTunnelListMouseUp);
+            // Native BorderStyle.FixedSingle always renders a fixed color
+            // regardless of theme, and isn't exposed as a settable property -
+            // wrap in a themed border panel instead (see Ctrl.Bordered).
+            this.lstTunnels.BorderStyle = BorderStyle.None;
+            this.lstTunnelsBorder = Ctrl.Bordered(this.lstTunnels);
+            this.lstTunnelsBorder.Dock = DockStyle.Fill;
 
             // ---- left bottom: action buttons ----
             this.pnlButtons.Dock = DockStyle.Bottom;
             this.pnlButtons.Height = 38;
-            this.btnAddTunnel.Text = "Add Tunnel";
-            this.btnAddTunnel.Location = new Point(0, 6);
-            this.btnAddTunnel.Size = new Size(110, 26);
+            // Four uniform icon-only buttons (Add Tunnel dropped its text -
+            // matches Delete/Export/QR's own icon-only look instead of being
+            // a different size/shape from the rest of the row), each a bit
+            // bigger than the old 30x26, with a uniform 6px gap between all
+            // four and vertically centered in the 38px-tall row.
+            this.btnAddTunnel.Text = "";
+            this.btnAddTunnel.Location = new Point(0, 4);
+            this.btnAddTunnel.Size = new Size(34, 30);
             this.btnAddTunnel.UseVisualStyleBackColor = true;
             this.btnAddTunnel.Click += new System.EventHandler(this.OnAddTunnelClicked);
             this.btnDelete.Text = "";
-            this.btnDelete.Location = new Point(116, 6);
-            this.btnDelete.Size = new Size(30, 26);
+            this.btnDelete.Location = new Point(40, 4);
+            this.btnDelete.Size = new Size(34, 30);
             this.btnDelete.UseVisualStyleBackColor = true;
             this.btnDelete.Click += new System.EventHandler(this.OnDeleteClicked);
             this.btnExport.Text = "";
-            this.btnExport.Location = new Point(150, 6);
-            this.btnExport.Size = new Size(30, 26);
+            this.btnExport.Location = new Point(80, 4);
+            this.btnExport.Size = new Size(34, 30);
             this.btnExport.UseVisualStyleBackColor = true;
             this.btnExport.Click += new System.EventHandler(this.OnExportClicked);
             this.btnQr = new Button();
             this.btnQr.Text = "";
-            this.btnQr.Location = new Point(184, 6);
-            this.btnQr.Size = new Size(30, 26);
+            this.btnQr.Location = new Point(120, 4);
+            this.btnQr.Size = new Size(34, 30);
             this.btnQr.UseVisualStyleBackColor = true;
             this.btnQr.Click += new System.EventHandler(this.OnQrClicked);
 
@@ -173,7 +190,7 @@ namespace WgSharp.Ui
 
             // detail children are added dynamically in BuildDetail()
 
-            this.split.Panel1.Controls.Add(this.lstTunnels);
+            this.split.Panel1.Controls.Add(this.lstTunnelsBorder);
             this.split.Panel1.Controls.Add(this.pnlButtons);
             this.pnlButtons.Controls.Add(this.btnAddTunnel);
             this.pnlButtons.Controls.Add(this.btnDelete);
@@ -205,9 +222,17 @@ namespace WgSharp.Ui
             this.Text = "WgSharp";
             // The .ico is embedded into WgSharp.exe itself via /win32icon at
             // build time (see build.cmd); pull it back out at runtime rather
-            // than shipping/loading a separate file.
-            try { this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
-            catch { this.Icon = null; }
+            // than shipping/loading a separate file. AppIconLoader rebuilds
+            // every embedded frame (not just one small shell-association
+            // size like Icon.ExtractAssociatedIcon gives), so the taskbar,
+            // Alt+Tab, and title bar all get a crisp frame instead of a
+            // stretched 32x32 one.
+            this.Icon = AppIconLoader.LoadFullEmbeddedIcon();
+            if (this.Icon == null)
+            {
+                try { this.Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); }
+                catch { this.Icon = null; }
+            }
 
             // ---- system tray icon ----
             // Tooltip text is kept current with the connection state by

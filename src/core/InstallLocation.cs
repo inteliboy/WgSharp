@@ -5,9 +5,9 @@ using System.Reflection;
 namespace WgSharp.Core
 {
     /// <summary>
-    /// Detects whether this process is running from WgSharp's fixed MSI
-    /// install location (Program Files\WgSharp — see installer\Product.wxs,
-    /// which deliberately offers no "choose a folder" dialog so this stays a
+    /// Detects whether this process is running from WgSharp's fixed Setup
+    /// install location (Program Files\WgSharp — see installer\WgSharp.nsi,
+    /// which deliberately offers no "choose a folder" page so this stays a
     /// reliable signal). When it is, WgSharp treats this as "I was properly
     /// installed, not just unzipped somewhere" and adjusts its defaults:
     ///
@@ -27,7 +27,7 @@ namespace WgSharp.Core
     {
         private static bool? _cached;
 
-        /// <summary>The fixed path the MSI installs to, with no trailing slash.</summary>
+        /// <summary>The fixed path the Setup installer installs to, with no trailing slash.</summary>
         public static string ExpectedInstallDir
         {
             get
@@ -99,13 +99,19 @@ namespace WgSharp.Core
         /// <summary>
         /// Called on every GUI launch from the installed location. If the
         /// user previously had the background service registered (recorded
-        /// in AppSettings.ServiceWasInstalled) but it's now missing — which
-        /// happens after an MSI upgrade, since the MSI removes and reinstalls
-        /// the exe but doesn't re-register the service — silently re-register
-        /// it. This restores the user's last known intent without them having
-        /// to open Settings and re-check the box manually after every upgrade.
-        /// Safe: Install() is idempotent and doesn't start or configure the
-        /// service, it only registers it with SCM.
+        /// in AppSettings.ServiceWasInstalled) but it's now missing, silently
+        /// re-register it. This restores the user's last known intent without
+        /// them having to open Settings and re-check the box manually. Under
+        /// the old MSI installer this was the routine post-upgrade path (a
+        /// known MSI quirk: ServiceInstall tied to a component whose version
+        /// didn't change could skip re-firing across a major upgrade). The
+        /// current NSIS installer (installer\WgSharp.nsi) doesn't have that
+        /// gap — its own InstallService step re-registers the service
+        /// unconditionally on every run, install or update — so this is now
+        /// pure defense-in-depth for the residual case (e.g. the service was
+        /// removed manually between launches). Safe either way: Install() is
+        /// idempotent and doesn't start or configure the service, it only
+        /// registers it with SCM.
         /// </summary>
         public static void RestoreServiceIfUpgradeWipedIt()
         {

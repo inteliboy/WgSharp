@@ -1,4 +1,5 @@
 using System;
+using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
@@ -41,10 +42,25 @@ namespace WgSharp.Ui
         {
             base.OnHandleCreated(e);
             InstallSystemMenu();
+            NativeMethods.SetDarkTitleBar(Handle, AppTheme.IsDark);
+            NativeMethods.SetBorderAndCaptionColor(Handle,
+                AppTheme.IsDark ? AppTheme.Border : Color.Empty,
+                AppTheme.IsDark ? AppTheme.Surface : Color.Empty);
+            ApplyScrollBarThemes();
             // See MainForm.cs: detects an already-active service tunnel and
             // starts the service-log pump. Must run from here (not Load) so it
             // still happens when the window starts hidden in the tray.
             RunDeferredStartupWork();
+        }
+
+        // Must be re-applied on every theme toggle, not just once at handle
+        // creation - a scrollbar themed dark at startup stays a black track
+        // forever if this is only ever called once (LenovoRepoBuilder's
+        // CLAUDE.md documents this exact failure mode, confirmed live there).
+        private void ApplyScrollBarThemes()
+        {
+            NativeMethods.SetScrollBarTheme(lstTunnels.Handle, AppTheme.IsDark);
+            NativeMethods.SetScrollBarTheme(txtLog.Handle, AppTheme.IsDark);
         }
     }
 }

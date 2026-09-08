@@ -57,7 +57,7 @@ namespace WgSharp.Ui
         {
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.Clear(Color.White);
+            g.Clear(AppTheme.PlotBg);
 
             // Symmetric outer margins: the plot is inset the SAME amount on the
             // left and the right edge of the control, so the chart sits evenly
@@ -73,12 +73,12 @@ namespace WgSharp.Ui
             var plot = new Rectangle(plotLeft, 22, Math.Max(10, plotRight - plotLeft), Height - 58);
 
             // Plot border (light box on all four sides).
-            using (var p = new Pen(Color.FromArgb(0xCF, 0xD4, 0xDA)))
+            using (var p = new Pen(AppTheme.PlotBorder))
                 g.DrawRectangle(p, plot);
             // A clearly visible vertical axis line on the LEFT edge of the plot,
             // heavier and darker than the light box, so the chart reads as a
             // proper graph with a defined left boundary.
-            using (var axis = new Pen(Color.FromArgb(0x8A, 0x93, 0x9C), 1.6f))
+            using (var axis = new Pen(AppTheme.FieldLabel, 1.6f))
                 g.DrawLine(axis, plot.Left, plot.Top, plot.Left, plot.Bottom);
 
             // title
@@ -95,7 +95,7 @@ namespace WgSharp.Ui
             // grid lines (4 horizontal). Scale labels sit in the reserved
             // gutter just past the plot's right border — which is now inside
             // the control, not spilling toward the window edge.
-            using (var gp = new Pen(Color.FromArgb(0xEC, 0xEF, 0xF2)))
+            using (var gp = new Pen(AppTheme.PlotGrid))
             using (var lf = new Font("Segoe UI", 7F))
             using (var lb = new SolidBrush(AppTheme.FieldLabel))
             {

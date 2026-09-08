@@ -62,6 +62,11 @@ namespace WgSharp.Ui
         private Label _valPubKey, _valPeerPubKey;
         private Label _valAllowedIps, _valEndpoint, _valHandshake, _valTransfer;
 
+        // Sibling overlay panels covering native TabControl chrome that
+        // ignores BackColor under visual styles - see BuildTabOverlays().
+        private Panel _tabRowFill, _tabFrameTop, _tabFrameBottom, _tabFrameLeft, _tabFrameRight, _tabGroupTop;
+        private Panel[] _tabInterGapFills;
+
         private ContextMenuStrip _trayMenu;
         // Closing the window normally minimizes to tray instead of exiting (see
         // OnFormClosing below); only the tray menu's Exit item sets this first.
@@ -80,8 +85,9 @@ namespace WgSharp.Ui
         {
             _startInTray = startInTray;
             InitializeComponent();
-            ApplyStaticTheme();
-            ApplyToolbarIcons();
+            BuildTabOverlays();
+            SetupToolbarTooltips();
+            ApplyTheme(); // also applies toolbar icons; calls BuildDetail() below redundantly but harmlessly
 
             // Host the live-stats panel in the Stats tab.
             _statsPanel = new StatsPanel();
@@ -91,9 +97,8 @@ namespace WgSharp.Ui
             _settingsPanel = new SettingsPanel();
             _settingsPanel.LoadFromSettings();
             _settingsPanel.PortableModeChanged += OnPortableModeChanged;
-            _settingsPanel.ExperimentalFeaturesChanged += ApplyExperimentalFeatures;
+            _settingsPanel.ThemeToggled += ApplyTheme;
             tabSettings.Controls.Add(_settingsPanel);
-            ApplyExperimentalFeatures(); // set initial visibility
 
             // Load any previously stored tunnels (DPAPI or portable).
             bool loaded = false;
@@ -194,11 +199,20 @@ namespace WgSharp.Ui
             try { WgSharp.Core.LoginAutostart.RefreshIfStale(); }
             catch (Exception ex) { Log(Logger.DebugMarker + "Login-autostart refresh check failed: " + ex.Message); }
 
+            // Subscribed once, for the lifetime of the form — see
+            // ServiceLogPump's own doc comment for why this is a shared static
+            // pump rather than something tied to whichever RemoteTunnelBackend
+            // instance happens to be _tunnel right now.
+            WgSharp.Core.ServiceLogPump.LogLine += LogRaw;
+
             // Tray icon context menu: status header, quick-connect profile
             // list, then Status/About/Exit — see OnTrayMenuOpening, which
             // rebuilds it fresh every time it's about to be shown so it can
             // never go stale relative to the tunnel list or connection state.
             _trayMenu = new ContextMenuStrip();
+            // Native ContextMenuStrip ignores app theme entirely unless given
+            // an explicit Renderer - reads AppTheme.* live, no toggle bookkeeping needed.
+            _trayMenu.Renderer = new ThemeMenuRenderer();
             _trayMenu.Opening += OnTrayMenuOpening;
             notifyIcon.ContextMenuStrip = _trayMenu;
             notifyIcon.BalloonTipClicked += OnUpdateBalloonClicked;
@@ -237,7 +251,14 @@ namespace WgSharp.Ui
             BeginInvoke(new Action(delegate
             {
                 OnTrayMenuOpening(this, null);   // pre-warm the tray menu path
-                CheckForRunningServiceTunnel();  // detect a service tunnel + start the log pump
+
+                // statusTimer now also drives the standing service-log pump
+                // (see OnStatusTick), so it runs for the whole life of the
+                // form regardless of whether a tunnel is active — started
+                // once here rather than only on activation/detection.
+                if (!AppSettings.PortableMode) statusTimer.Start();
+
+                CheckForRunningServiceTunnel();  // detect an already-active service tunnel
                 MaybeAutoReconnect();            // reconnect if upgraded/restarted while connected
 
                 // Offer the one-time elevated setup if the constructor flagged
@@ -272,8 +293,8 @@ namespace WgSharp.Ui
             }));
         }
 
-        // After an MSI upgrade (or any restart while a tunnel was active),
-        // ServiceState still holds the last tunnel name — the MSI doesn't touch
+        // After a Setup upgrade (or any restart while a tunnel was active),
+        // ServiceState still holds the last tunnel name — Setup doesn't touch
         // ProgramData. If the service is installed but not running a tunnel yet,
         // and we have a last-tunnel record, activate it automatically so the
         // user doesn't have to reconnect manually after every upgrade.
@@ -328,16 +349,44 @@ namespace WgSharp.Ui
         private string _autoReconnectName;
         private int _autoReconnectNegotiatingTicks;
 
+        // Called once from the constructor AND again from ApplyTheme() on
+        // every toggle (Export/QrGlyph's fill color is theme-dependent - the
+        // old fixed dark gray was near-invisible on a dark button surface).
+        // Disposes the previous Image first: repeated calls would otherwise
+        // leak a GDI bitmap per toggle.
         private void ApplyToolbarIcons()
         {
-            btnAddTunnel.Image = Icons.Add(16);
-            btnAddTunnel.ImageAlign = ContentAlignment.MiddleLeft;
-            btnAddTunnel.TextAlign = ContentAlignment.MiddleRight;
-            btnAddTunnel.TextImageRelation = TextImageRelation.ImageBeforeText;
-            btnDelete.Image = Icons.Delete(16);
-            btnExport.Image = Icons.Export(16);
-            btnQr.Image = Icons.QrGlyph(16);
+            if (btnAddTunnel.Image != null) btnAddTunnel.Image.Dispose();
+            if (btnDelete.Image != null) btnDelete.Image.Dispose();
+            if (btnExport.Image != null) btnExport.Image.Dispose();
+            if (btnQr.Image != null) btnQr.Image.Dispose();
 
+            // All four toolbar buttons are icon-only (Add Tunnel dropped its
+            // "Add Tunnel" label to match Delete/Export/QR's own look and
+            // uniform size), same code path for all four so the same Padding
+            // fix below applies identically to every one of them.
+            btnAddTunnel.Text = "";
+            btnAddTunnel.Image = Icons.Add(18);
+            btnAddTunnel.ImageAlign = ContentAlignment.MiddleCenter;
+            btnDelete.Image = Icons.Delete(18);
+            btnExport.Image = Icons.Export(18, AppTheme.FieldValue);
+            btnQr.Image = Icons.QrGlyph(18, AppTheme.FieldValue);
+
+            // Button's own MiddleCenter image layout consistently sits a couple
+            // px low and right of true center on these flat buttons (measured
+            // against each button's geometric center, same bias on every icon
+            // regardless of its own glyph shape, so it's a layout quirk, not a
+            // drawing one) - nudge the centering rectangle back with Padding
+            // rather than shifting each icon's own pixels.
+            var iconPad = new Padding(0, 0, 2, 3);
+            btnAddTunnel.Padding = iconPad;
+            btnDelete.Padding = iconPad;
+            btnExport.Padding = iconPad;
+            btnQr.Padding = iconPad;
+        }
+
+        private void SetupToolbarTooltips()
+        {
             var tips = new ToolTip();
             tips.SetToolTip(btnAddTunnel, "Import tunnel(s) from file");
             tips.SetToolTip(btnDelete, "Remove selected tunnel");
@@ -345,14 +394,142 @@ namespace WgSharp.Ui
             tips.SetToolTip(btnQr, "Show QR code for selected tunnel");
         }
 
-        private void ApplyStaticTheme()
+        // Applies the current AppTheme.IsDark to every already-built control.
+        // Called once at startup (constructor) and again on every toggle of
+        // the Settings tab's "Dark theme" checkbox. Controls that read
+        // AppTheme.* live in their own OnPaint (ThemedGroupBox, ThemedCheckBox,
+        // AreaChart, StatusRow's shield, ThemeMenuRenderer) only need
+        // Invalidate() here, not per-instance recoloring - same pattern
+        // LenovoRepoBuilder's ApplyTheme/RestyleEntries use.
+        private void ApplyTheme()
         {
             BackColor = AppTheme.WindowBg;
             pnlDetail.BackColor = AppTheme.PanelBg;
             lstTunnels.BackColor = AppTheme.ListBg;
             lstTunnels.ForeColor = AppTheme.FieldValue;
+            if (lstTunnelsBorder != null) lstTunnelsBorder.BackColor = AppTheme.Border;
             txtLog.BackColor = AppTheme.LogBg;
-            txtLog.ForeColor = AppTheme.FieldValue;
+            txtLog.ForeColor = AppTheme.LogFg;
+
+            tabs.BackColor = AppTheme.WindowBg;
+            foreach (TabPage tp in tabs.TabPages) tp.BackColor = AppTheme.WindowBg;
+            if (_tabRowFill != null) _tabRowFill.BackColor = AppTheme.WindowBg;
+            if (_tabFrameTop != null) _tabFrameTop.BackColor = AppTheme.WindowBg;
+            if (_tabFrameBottom != null) _tabFrameBottom.BackColor = AppTheme.WindowBg;
+            if (_tabFrameLeft != null) _tabFrameLeft.BackColor = AppTheme.WindowBg;
+            if (_tabFrameRight != null) _tabFrameRight.BackColor = AppTheme.WindowBg;
+            if (_tabInterGapFills != null)
+                foreach (Panel p in _tabInterGapFills) p.BackColor = AppTheme.WindowBg;
+
+            Ctrl.FlattenButton(btnAddTunnel, false);
+            Ctrl.FlattenButton(btnDelete, false);
+            Ctrl.FlattenButton(btnExport, false);
+            Ctrl.FlattenButton(btnQr, false);
+            Ctrl.FlattenButton(btnActivate, true);
+            Ctrl.FlattenButton(btnEdit, false);
+            ApplyToolbarIcons(); // icon glyph color depends on theme too
+
+            if (IsHandleCreated)
+            {
+                NativeMethods.SetDarkTitleBar(Handle, AppTheme.IsDark);
+                NativeMethods.SetBorderAndCaptionColor(Handle,
+                    AppTheme.IsDark ? AppTheme.Border : Color.Empty,
+                    AppTheme.IsDark ? AppTheme.Surface : Color.Empty);
+                ApplyScrollBarThemes();
+            }
+
+            BuildDetail(); // re-render field rows with current AppTheme colors
+            if (_statsPanel != null) _statsPanel.RefreshTheme();
+            if (_settingsPanel != null) _settingsPanel.RefreshTheme();
+            Invalidate(true);
+        }
+
+        // Sibling overlay panels covering native TabControl chrome that
+        // ignores BackColor under visual styles (the tab-row strip right of
+        // the last tab, the light "notebook frame" border FlatButtons still
+        // leaves around the page area, and the gaps between adjacent tab
+        // buttons) - ported from LenovoRepoBuilder's MainForm.cs (see that
+        // project's CLAUDE.md for the original, live-verified rationale),
+        // generalized there for an arbitrary tab count; this app has 4.
+        // Must run once, after InitializeComponent (so tabs.TabPages/handle
+        // exist) and before the first ApplyTheme() call (which recolors
+        // these panels).
+        private void BuildTabOverlays()
+        {
+            _tabRowFill = new Panel(); Controls.Add(_tabRowFill); _tabRowFill.BringToFront();
+            _tabFrameTop = new Panel(); Controls.Add(_tabFrameTop); _tabFrameTop.BringToFront();
+            _tabFrameBottom = new Panel(); Controls.Add(_tabFrameBottom); _tabFrameBottom.BringToFront();
+            _tabFrameLeft = new Panel(); Controls.Add(_tabFrameLeft); _tabFrameLeft.BringToFront();
+            _tabFrameRight = new Panel(); Controls.Add(_tabFrameRight); _tabFrameRight.BringToFront();
+            _tabGroupTop = new Panel(); Controls.Add(_tabGroupTop); _tabGroupTop.BringToFront();
+
+            int gaps = Math.Max(0, tabs.TabCount - 1);
+            _tabInterGapFills = new Panel[gaps];
+            for (int i = 0; i < gaps; i++)
+            {
+                Panel gap = new Panel();
+                Controls.Add(gap); gap.BringToFront();
+                _tabInterGapFills[i] = gap;
+            }
+
+            Action layout = delegate
+            {
+                if (tabs.TabCount == 0) return;
+                Rectangle lastTabRect = tabs.GetTabRect(tabs.TabCount - 1);
+
+                _tabRowFill.Location = new Point(tabs.Left + lastTabRect.Right - 3, tabs.Top);
+                _tabRowFill.Size = new Size(Math.Max(0, tabs.Width - lastTabRect.Right + 3), lastTabRect.Bottom);
+
+                for (int i = 0; i < gaps; i++)
+                {
+                    Rectangle a = tabs.GetTabRect(i);
+                    Rectangle b = tabs.GetTabRect(i + 1);
+                    _tabInterGapFills[i].Location = new Point(tabs.Left + a.Right - 2, tabs.Top);
+                    _tabInterGapFills[i].Size = new Size(Math.Max(0, b.Left - a.Right + 4), lastTabRect.Bottom);
+                }
+
+                _tabFrameTop.Location = new Point(tabs.Left, tabs.Top + lastTabRect.Bottom - 3);
+                _tabFrameTop.Size = new Size(tabs.Width, 7);
+
+                _tabGroupTop.Location = new Point(tabs.Left, tabs.Top);
+                _tabGroupTop.Size = new Size(tabs.Width, 4);
+
+                _tabFrameBottom.Location = new Point(tabs.Left, tabs.Bottom - 6);
+                _tabFrameBottom.Size = new Size(tabs.Width, 6);
+
+                _tabFrameLeft.Location = new Point(tabs.Left, tabs.Top);
+                _tabFrameLeft.Size = new Size(4, tabs.Height);
+
+                _tabFrameRight.Location = new Point(tabs.Right - 4, tabs.Top);
+                _tabFrameRight.Size = new Size(4, tabs.Height);
+            };
+            layout();
+            tabs.Resize += delegate { layout(); };
+        }
+
+        // Owner-draws one tab's fill/text/accent underline - the native
+        // TabControl header always paints itself via visual styles (light,
+        // regardless of BackColor) otherwise.
+        private void DrawTab(object sender, DrawItemEventArgs e)
+        {
+            TabControl tc = (TabControl)sender;
+            TabPage page = tc.TabPages[e.Index];
+            bool selected = e.Index == tc.SelectedIndex;
+            Rectangle bounds = tc.GetTabRect(e.Index);
+
+            using (SolidBrush bg = new SolidBrush(selected ? AppTheme.Surface : AppTheme.WindowBg))
+                e.Graphics.FillRectangle(bg, bounds);
+            if (selected)
+                using (Pen p = new Pen(AppTheme.Accent, 2))
+                    e.Graphics.DrawLine(p, bounds.Left, bounds.Bottom - 1, bounds.Right, bounds.Bottom - 1);
+
+            using (StringFormat sf = new StringFormat())
+            {
+                sf.Alignment = StringAlignment.Center;
+                sf.LineAlignment = StringAlignment.Center;
+                using (SolidBrush fg = new SolidBrush(selected ? AppTheme.FieldValue : AppTheme.FieldLabel))
+                    e.Graphics.DrawString(page.Text.Trim(), tc.Font, fg, bounds, sf);
+            }
         }
 
         // Maximum number of lines kept in the Log tab's RichTextBox.
@@ -382,11 +559,6 @@ namespace WgSharp.Ui
             AppendLogLine(DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff ") + tagged);
         }
 
-        // Appends a line that already carries its own timestamp (forwarded from
-        // the background service's in-memory log via RemoteTunnelBackend.
-        // PumpServiceLog), so we don't prepend a second timestamp the way Log
-        // does. Verbosity is already filtered service-side, so these are shown
-        // as-is.
         // One-time setup gate for the unelevated GUI. If the manager service
         // is already reachable, does nothing. Otherwise explains the single
         // UAC prompt, runs "--elevated-setup" via runas, and reports the
@@ -404,6 +576,7 @@ namespace WgSharp.Ui
         // fully failure-safe (see UpdateChecker) — offline / rate-limited /
         // parse failure all yield "no update" — so the worst case is silence.
         private string _updateUrl;
+        private string _updateInstallerUrl;
         private void MaybeCheckForUpdates()
         {
             if (!AppSettings.CheckForUpdates) return;
@@ -424,19 +597,24 @@ namespace WgSharp.Ui
         {
             if (IsDisposed || Disposing) return;
             _updateUrl = res.ReleaseUrl;
+            _updateInstallerUrl = res.InstallerDownloadUrl;
+            bool canAutoInstall = !string.IsNullOrEmpty(_updateInstallerUrl);
             Log("A newer WgSharp release is available: " + res.LatestVersion +
                 " (you have " + res.CurrentVersion + "). Download: " + res.ReleaseUrl);
 
-            // Non-intrusive nudge: a tray balloon the user can click to open the
-            // release page. No modal dialog — an update is informational, not
-            // something to interrupt the user over.
+            // Non-intrusive nudge: a tray balloon the user can click to either
+            // download+install directly (when the release has a Setup asset -
+            // see UpdateChecker.InstallerAssetName) or open the release page.
+            // No modal dialog — an update is informational, not something to
+            // interrupt the user over.
             try
             {
                 if (notifyIcon != null)
                 {
                     notifyIcon.BalloonTipTitle = "WgSharp update available";
                     notifyIcon.BalloonTipText = "Version " + res.LatestVersion + " is available (you have " +
-                        res.CurrentVersion + "). Click to open the download page.";
+                        res.CurrentVersion + "). Click to " +
+                        (canAutoInstall ? "download and install it." : "open the download page.");
                     notifyIcon.ShowBalloonTip(10000);
                 }
             }
@@ -445,21 +623,57 @@ namespace WgSharp.Ui
 
         private void OnUpdateBalloonClicked(object sender, EventArgs e)
         {
-            if (string.IsNullOrEmpty(_updateUrl)) return;
-            try { System.Diagnostics.Process.Start(_updateUrl); }
-            catch (Exception ex) { Log(Logger.DebugMarker + "Couldn't open the release page: " + ex.Message); }
+            if (string.IsNullOrEmpty(_updateInstallerUrl))
+            {
+                if (string.IsNullOrEmpty(_updateUrl)) return;
+                try { System.Diagnostics.Process.Start(_updateUrl); }
+                catch (Exception ex) { Log(Logger.DebugMarker + "Couldn't open the release page: " + ex.Message); }
+                return;
+            }
+
+            Log("Downloading update installer...");
+            string releaseUrl = _updateUrl;
+            string installerUrl = _updateInstallerUrl;
+            WgSharp.Core.UpdateChecker.DownloadInstallerAsync(installerUrl, delegate (string localPath, Exception err)
+            {
+                Action finish = delegate
+                {
+                    if (IsDisposed || Disposing) return;
+                    if (err != null || string.IsNullOrEmpty(localPath))
+                    {
+                        Log(Logger.DebugMarker + "Update download failed: " +
+                            (err != null ? err.Message : "unknown error") + " — opening the release page instead.");
+                        try { System.Diagnostics.Process.Start(releaseUrl); } catch { }
+                        return;
+                    }
+                    try
+                    {
+                        Log("Launching WgSharp Setup to install the update silently...");
+                        WgSharp.Core.UpdateChecker.LaunchInstallerSilently(localPath);
+                        _exitRequested = true;
+                        Close();
+                    }
+                    catch (Exception ex)
+                    {
+                        Log(Logger.DebugMarker + "Couldn't launch the downloaded installer: " + ex.Message);
+                        try { System.Diagnostics.Process.Start(releaseUrl); } catch { }
+                    }
+                };
+                try { if (IsHandleCreated && InvokeRequired) BeginInvoke(finish); else finish(); }
+                catch { /* form closing/closed: ignore */ }
+            });
         }
 
         private void NotifyPortableNeedsElevation()
         {
-            var answer = MessageBox.Show(this,
+            var answer = ThemedMessageBox.Show(this,
                 "WgSharp is running in portable mode, which needs administrator rights to create the " +
                 "VPN adapter (portable mode installs no background service by design).\r\n\r\n" +
                 "Relaunch WgSharp as administrator now?\r\n\r\n" +
                 "\u2022  Yes \u2014 WgSharp closes and reopens with an administrator prompt.\r\n" +
                 "\u2022  No \u2014 WgSharp closes; you can start it again yourself with right-click \u2192 " +
                 "Run as administrator.\r\n\r\n" +
-                "(Installing WgSharp with the MSI avoids this entirely \u2014 the installed version runs " +
+                "(Installing WgSharp with Setup avoids this entirely \u2014 the installed version runs " +
                 "without any prompt.)",
                 "WgSharp \u2014 portable mode needs administrator",
                 MessageBoxButtons.YesNo, MessageBoxIcon.Information);
@@ -484,7 +698,7 @@ namespace WgSharp.Ui
                 // declined). Tell the user how to do it by hand, then close —
                 // portable mode can't do anything useful unelevated, so we
                 // don't leave a dead window open.
-                MessageBox.Show(this,
+                ThemedMessageBox.Show(this,
                     (err == "cancelled"
                         ? "The administrator prompt was declined.\r\n\r\n"
                         : "WgSharp couldn't relaunch itself as administrator (" + err + ").\r\n\r\n") +
@@ -496,7 +710,7 @@ namespace WgSharp.Ui
 
             // "No", or the elevation attempt fell through: portable mode is
             // unusable unelevated, so exit rather than sit in a window that
-            // can't connect. (Installing via the MSI is the prompt-free path.)
+            // can't connect. (Installing via Setup is the prompt-free path.)
             _exitingForElevation = true;
             Application.Exit();
         }
@@ -523,8 +737,8 @@ namespace WgSharp.Ui
                 _setupOffered = true;
 
                 // If the service is already REGISTERED (the normal case now —
-                // the MSI registers and starts it at install time), it just
-                // needs to be running. Try to start it directly; a standard
+                // Setup registers it, but doesn't start it, at install time),
+                // it just needs to be running. Try to start it directly; a standard
                 // user usually can't (SERVICE_START is denied), so if that
                 // fails, fall through to the one-time elevated setup, which
                 // starts it as part of its work. No Yes/No prompt either way.
@@ -569,7 +783,7 @@ namespace WgSharp.Ui
                     return;
                 }
 
-                // Not registered at all. This is the non-MSI installed layout
+                // Not registered at all. This is the non-Setup-installed layout
                 // (or the service was manually removed). Registering needs
                 // elevation, which this asInvoker GUI doesn't have.
                 if (!allowElevation)
@@ -817,6 +1031,7 @@ namespace WgSharp.Ui
             bool isActiveTunnel = _active && name == _activeTunnelName;
 
             var menu = new ContextMenuStrip();
+            menu.Renderer = new ThemeMenuRenderer(); // native menus ignore app theme without an explicit Renderer
             var toggleItem = new ToolStripMenuItem(isActiveTunnel ? "Disconnect" : "Connect");
             toggleItem.Click += new EventHandler(OnActivateToggle);
             menu.Items.Add(toggleItem);
@@ -1028,15 +1243,21 @@ namespace WgSharp.Ui
             // Theme the detail surface.
             pnlDetail.BackColor = AppTheme.PanelBg;
 
-            // A small, left-aligned Activate button (like the official app) living
-            // in a thin host strip between the two groups.
+            // Activate button living in a thin host strip between the two
+            // groups, lined up under the field VALUES column (not the
+            // labels) so it visually reads as part of the Interface section
+            // instead of floating at the panel's bare left edge - matching
+            // where the official client's Activate/Deactivate button sits,
+            // directly below the Interface fields' values.
             var actHost = new Panel();
             actHost.Dock = DockStyle.Top;
             actHost.Height = 40;
             actHost.BackColor = Color.Transparent;
             btnActivate.Dock = DockStyle.None;
             btnActivate.Size = new Size(96, 26);
-            btnActivate.Location = new Point(6, 7);
+            int valueColumnX = grpInterface.Padding.Left + 6 /* FieldGrid.Create()'s own Padding.Left */
+                + 140 /* FieldGrid's label column width */;
+            btnActivate.Location = new Point(valueColumnX, 7);
             actHost.Controls.Add(btnActivate);
 
             // Rebuild the top-docked stack: Peer, Activate strip, Interface (reverse add).
@@ -1255,12 +1476,12 @@ namespace WgSharp.Ui
             }
 
             // Actually exiting now (tray Exit, Windows shutdown/logoff,
-            // Task Manager, or an external close request such as the MSI
-            // installer's util:CloseApplication asking us to exit before an
-            // upgrade). If a tunnel is running IN THIS PROCESS (the managed
-            // or WireGuardNT backend, run directly rather than through the
-            // background service), tear it down SYNCHRONOUSLY here, before
-            // letting the close proceed.
+            // Task Manager, or an external close request such as the Setup
+            // installer's CloseWgSharp.ps1 — see installer\WgSharp.nsi —
+            // asking us to exit before an upgrade). If a tunnel is running IN
+            // THIS PROCESS (the managed or WireGuardNT backend, run directly
+            // rather than through the background service), tear it down
+            // SYNCHRONOUSLY here, before letting the close proceed.
             //
             // CRITICAL: this must NEVER apply to a RemoteTunnelBackend
             // (service-driven tunnel). RemoteTunnelBackend.Stop() doesn't
@@ -1352,7 +1573,7 @@ namespace WgSharp.Ui
             {
                 _busy = false;
                 Log("Activation failed: " + ex.Message);
-                MessageBox.Show(this, ex.Message, "Activation failed",
+                ThemedMessageBox.Show(this, ex.Message, "Activation failed",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
@@ -1371,6 +1592,15 @@ namespace WgSharp.Ui
             ThreadPool.QueueUserWorkItem(delegate
             {
                 if (!ServiceClient.IsServiceRunning()) return;
+
+                // Pull the service's buffered log right away, regardless of
+                // whether it ends up running a tunnel below. The interesting
+                // lines after a restart are often about why it DIDN'T end up
+                // with one active (a failed boot-time reconnect, a startup
+                // error) — this used to be gated behind finding an active
+                // tunnel first, so that case never reached the GUI at all.
+                try { WgSharp.Core.ServiceLogPump.Pump(); } catch { }
+
                 string resp = ServiceClient.SendCommand("STATUS");
                 string name;
                 TunnelStatus s = ServiceProtocol.ParseStatus(resp, out name);
@@ -1390,7 +1620,6 @@ namespace WgSharp.Ui
                         if (_active || _busy) return;
                         var tunnel = new RemoteTunnelBackend(name);
                         tunnel.LogMessage += Log;
-                        tunnel.ServiceLogLine += LogRaw;
                         _tunnel = tunnel;
                         _active = true;
                         _activeTunnelName = name;
@@ -1411,15 +1640,6 @@ namespace WgSharp.Ui
                         statusTimer.Start();
                         lstTunnels.Invalidate();
                         Log("Detected an already-active tunnel '" + name + "' from the background service.");
-                        // Immediately fetch the service's buffered log so the
-                        // Log tab isn't empty while waiting for the first 1s
-                        // timer tick. Do it on a background thread so the UI
-                        // thread isn't blocked by the pipe call.
-                        var rt = tunnel as RemoteTunnelBackend;
-                        if (rt != null) ThreadPool.QueueUserWorkItem(delegate
-                        {
-                            try { rt.PumpServiceLog(); } catch { }
-                        });
                     }));
                 }
                 catch (ObjectDisposedException) { }
@@ -1465,7 +1685,6 @@ namespace WgSharp.Ui
             {
                 Log("Background service running; activating through it.");
                 tunnel = new RemoteTunnelBackend(tunnelNameSnapshot);
-                ((RemoteTunnelBackend)tunnel).ServiceLogLine += LogRaw;
             }
             else if (!WgSharp.Core.Elevation.IsProcessElevated())
             {
@@ -1479,7 +1698,6 @@ namespace WgSharp.Ui
                 {
                     Log("Background service is now running; activating through it.");
                     tunnel = new RemoteTunnelBackend(tunnelNameSnapshot);
-                    ((RemoteTunnelBackend)tunnel).ServiceLogLine += LogRaw;
                 }
                 else
                 {
@@ -1532,7 +1750,7 @@ namespace WgSharp.Ui
                             try { tunnel.Stop(); } catch { } // best-effort cleanup of a half-started tunnel
                             UpdateTrayTooltip(null);
                             Log("Activation failed: " + failure.Message);
-                            MessageBox.Show(this, failure.Message, "Activation failed",
+                            ThemedMessageBox.Show(this, failure.Message, "Activation failed",
                                 MessageBoxButtons.OK, MessageBoxIcon.Error);
                             return;
                         }
@@ -1548,10 +1766,9 @@ namespace WgSharp.Ui
                         Log("Tunnel '" + tunnelNameSnapshot + "' activated.");
                         // Immediately fetch buffered service log so it appears
                         // without waiting for the first 1s timer tick.
-                        var rtb = _tunnel as RemoteTunnelBackend;
-                        if (rtb != null) ThreadPool.QueueUserWorkItem(delegate
+                        if (_tunnel is RemoteTunnelBackend) ThreadPool.QueueUserWorkItem(delegate
                         {
-                            try { rtb.PumpServiceLog(); } catch { }
+                            try { WgSharp.Core.ServiceLogPump.Pump(); } catch { }
                         });
                     }));
                 }
@@ -1577,7 +1794,10 @@ namespace WgSharp.Ui
         {
             if (_tunnel == null) { if (onComplete != null) onComplete(); return; }
             ITunnelBackend tunnel = _tunnel;
-            statusTimer.Stop();
+            // statusTimer is NOT stopped here (deliberately, unlike before) —
+            // it now also drives the standing service-log pump (see
+            // OnStatusTick), which should keep running for as long as the
+            // form does, tunnel active or not.
             _busy = true;
             btnActivate.Enabled = false;
             btnActivate.Text = "Deactivating\u2026";
@@ -1616,17 +1836,17 @@ namespace WgSharp.Ui
         // ---------------- live status ----------------
         private void OnStatusTick(object sender, EventArgs e)
         {
-            if (_tunnel == null) return;
+            // Pull any new lines from the service's in-memory log into our Log
+            // tab (no service.log file needed) regardless of whether a tunnel
+            // is active here — the service does plenty even when idle
+            // (startup, driver bootstrap, a boot-time reconnect that failed),
+            // and gating this on an active tunnel used to mean the GUI was
+            // blind to service activity for the whole span between a restart
+            // and the next successful activation, if there ever was one.
+            // Cheap STATUS-class pipe call either way.
+            try { WgSharp.Core.ServiceLogPump.Pump(); } catch { }
 
-            // If the running tunnel is service-driven, pull any new lines from
-            // the service's in-memory log into our Log tab (no service.log file
-            // needed). Cheap STATUS-class pipe call; done off the tick's hot
-            // path is unnecessary since it returns immediately.
-            var remote = _tunnel as RemoteTunnelBackend;
-            if (remote != null)
-            {
-                try { remote.PumpServiceLog(); } catch { }
-            }
+            if (_tunnel == null) return;
 
             // The list shield always reflects live state...
             lstTunnels.Invalidate();
@@ -1767,7 +1987,7 @@ namespace WgSharp.Ui
                 try { ConfigStore.Load(tunnelName, pw); return pw; }
                 catch
                 {
-                    if (MessageBox.Show(this, "Incorrect password. Try again?", "WgSharp",
+                    if (ThemedMessageBox.Show(this, "Incorrect password. Try again?", "WgSharp",
                             MessageBoxButtons.RetryCancel, MessageBoxIcon.Warning) != DialogResult.Retry)
                         return null;
                 }
@@ -1797,7 +2017,7 @@ namespace WgSharp.Ui
                 }
                 catch
                 {
-                    if (MessageBox.Show(this, "Incorrect password. Try again?", "WgSharp",
+                    if (ThemedMessageBox.Show(this, "Incorrect password. Try again?", "WgSharp",
                             MessageBoxButtons.RetryCancel, MessageBoxIcon.Warning) != DialogResult.Retry)
                         return false;
                 }
@@ -1837,15 +2057,6 @@ namespace WgSharp.Ui
             foreach (object item in lstTunnels.Items) names.Add(item.ToString());
             AppSettings.TunnelOrder = string.Join("|", names.ToArray());
             AppSettings.Save();
-        }
-
-        private void ApplyExperimentalFeatures()
-        {
-            // "Scan from QR code" in the Add menu is experimental (webcam
-            // scanning is functional but not reliable on all hardware/drivers).
-            // The menu is rebuilt on every click so nothing to show/hide here;
-            // the gate is in OnAddTunnelClicked based on AppSettings.ExperimentalFeatures.
-            // "Show QR" on a tunnel (btnQr) is always visible — stable feature.
         }
 
         private void OnPortableModeChanged()
@@ -1891,15 +2102,13 @@ namespace WgSharp.Ui
         private void OnAddTunnelClicked(object sender, EventArgs e)
         {
             var menu = new ContextMenuStrip();
+            menu.Renderer = new ThemeMenuRenderer(); // native menus ignore app theme without an explicit Renderer
             var importItem = new ToolStripMenuItem("Import tunnel(s) from file\u2026");
             importItem.Click += new EventHandler(OnLoadClicked);
             menu.Items.Add(importItem);
-            if (AppSettings.ExperimentalFeatures)
-            {
-                var scanItem = new ToolStripMenuItem("Scan from QR code \u2014 experimental");
-                scanItem.Click += new EventHandler(OnScanQrClicked);
-                menu.Items.Add(scanItem);
-            }
+            var scanItem = new ToolStripMenuItem("Scan from QR code\u2026");
+            scanItem.Click += new EventHandler(OnScanQrClicked);
+            menu.Items.Add(scanItem);
             var emptyItem = new ToolStripMenuItem("Add empty tunnel\u2026");
             emptyItem.Click += new EventHandler(OnAddEmptyTunnel);
             menu.Items.Add(emptyItem);
@@ -1935,7 +2144,7 @@ namespace WgSharp.Ui
             try { WgSharp.Core.Config.Parse(text); }
             catch (Exception ex)
             {
-                MessageBox.Show(this, "The scanned QR code doesn't look like a valid WireGuard " +
+                ThemedMessageBox.Show(this, "The scanned QR code doesn't look like a valid WireGuard " +
                     "config:\n\n" + ex.Message, "WgSharp", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
@@ -1949,7 +2158,7 @@ namespace WgSharp.Ui
 
             if (lstTunnels.Items.IndexOf(name) >= 0)
             {
-                if (MessageBox.Show(this, "A tunnel named '" + name + "' already exists. Overwrite it?",
+                if (ThemedMessageBox.Show(this, "A tunnel named '" + name + "' already exists. Overwrite it?",
                         "WgSharp", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                     return;
             }
@@ -2138,7 +2347,7 @@ namespace WgSharp.Ui
                     try { return WgSharp.Core.PortableCrypto.Decrypt(raw, pw); }
                     catch
                     {
-                        if (MessageBox.Show(this, "Incorrect password. Try again?", "WgSharp",
+                        if (ThemedMessageBox.Show(this, "Incorrect password. Try again?", "WgSharp",
                                 MessageBoxButtons.RetryCancel, MessageBoxIcon.Warning) != DialogResult.Retry)
                             return null;
                     }
@@ -2176,12 +2385,12 @@ namespace WgSharp.Ui
             // Only block deletion of the tunnel that is actually connected.
             if (_active && toRemove == _activeTunnelName)
             {
-                MessageBox.Show(this, "Deactivate '" + toRemove + "' before removing it.",
+                ThemedMessageBox.Show(this, "Deactivate '" + toRemove + "' before removing it.",
                     "Tunnel active", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
-            if (MessageBox.Show(this, "Remove tunnel '" + toRemove + "'?", "Confirm",
+            if (ThemedMessageBox.Show(this, "Remove tunnel '" + toRemove + "'?", "Confirm",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes)
                 return;
 
@@ -2375,7 +2584,7 @@ namespace WgSharp.Ui
                 catch (Exception ex)
                 {
                     Log("Export failed: " + ex.Message);
-                    MessageBox.Show(this, ex.Message, "Export failed",
+                    ThemedMessageBox.Show(this, ex.Message, "Export failed",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
@@ -2386,7 +2595,7 @@ namespace WgSharp.Ui
         {
             if (string.IsNullOrEmpty(_configText) || _config == null)
             {
-                MessageBox.Show(this, "Select a valid tunnel first.", "QR code",
+                ThemedMessageBox.Show(this, "Select a valid tunnel first.", "QR code",
                     MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
@@ -2398,7 +2607,7 @@ namespace WgSharp.Ui
             catch (Exception ex)
             {
                 Log("QR generation failed: " + ex.Message);
-                MessageBox.Show(this, ex.Message, "QR code", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                ThemedMessageBox.Show(this, ex.Message, "QR code", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         }
     }

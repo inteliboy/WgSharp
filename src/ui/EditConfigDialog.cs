@@ -18,13 +18,6 @@ namespace WgSharp.Ui
         private bool _highlighting;
         private Timer _debounce;
 
-        // palette approximating the official editor
-        private static readonly Color ColSection = Color.FromArgb(0x00, 0x4A, 0xCC); // [Interface]
-        private static readonly Color ColKey = Color.FromArgb(0x7A, 0x3E, 0x9D);     // PrivateKey
-        private static readonly Color ColValue = Color.FromArgb(0x1F, 0x5F, 0xBF);   // = values
-        private static readonly Color ColComment = Color.FromArgb(0x3C, 0x8A, 0x3C); // # comments
-        private static readonly Color ColDefault = Color.FromArgb(0x20, 0x20, 0x20);
-
         public string TunnelName { get { return _name.Text.Trim(); } }
         public string ConfigText { get { return _config.Text; } }
 
@@ -38,7 +31,14 @@ namespace WgSharp.Ui
             ClientSize = new Size(520, 470);
             MinimumSize = new Size(420, 360);
             Font = new Font("Segoe UI", 9F);
-            BackColor = Color.White;
+            BackColor = AppTheme.WindowBg;
+            HandleCreated += delegate
+            {
+                NativeMethods.SetDarkTitleBar(Handle, AppTheme.IsDark);
+                NativeMethods.SetBorderAndCaptionColor(Handle,
+                    AppTheme.IsDark ? AppTheme.Border : Color.Empty,
+                    AppTheme.IsDark ? AppTheme.Surface : Color.Empty);
+            };
 
             var lblName = new Label
             {
@@ -46,7 +46,7 @@ namespace WgSharp.Ui
                 Location = new Point(14, 17),
                 Size = new Size(80, 20),
                 TextAlign = ContentAlignment.MiddleRight,
-                ForeColor = FieldGrid.LabelColor
+                ForeColor = AppTheme.FieldLabel
             };
             _name = new TextBox
             {
@@ -55,6 +55,7 @@ namespace WgSharp.Ui
                 Size = new Size(408, 24),
                 Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
             };
+            Ctrl.ThemeEntry(_name);
 
             var lblPub = new Label
             {
@@ -62,14 +63,14 @@ namespace WgSharp.Ui
                 Location = new Point(14, 47),
                 Size = new Size(80, 20),
                 TextAlign = ContentAlignment.MiddleRight,
-                ForeColor = FieldGrid.LabelColor
+                ForeColor = AppTheme.FieldLabel
             };
             _pubKeyValue = new Label
             {
                 Text = "(derived from PrivateKey)",
                 Location = new Point(98, 47),
                 Size = new Size(408, 20),
-                ForeColor = Color.FromArgb(0x55, 0x55, 0x55),
+                ForeColor = AppTheme.FieldLabel,
                 Font = new Font("Consolas", 8.5F),
                 AutoEllipsis = true,
                 Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
@@ -79,15 +80,21 @@ namespace WgSharp.Ui
             {
                 Text = configText,
                 Font = new Font("Consolas", 10F),
+                BackColor = AppTheme.EntryBg,
+                ForeColor = AppTheme.EntryFg,
                 Location = new Point(14, 76),
                 Size = new Size(492, 312),
                 Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
-                BorderStyle = BorderStyle.FixedSingle,
+                BorderStyle = BorderStyle.None,
                 AcceptsTab = true,
                 WordWrap = false,
                 HideSelection = false
             };
             _config.TextChanged += new EventHandler(OnConfigChanged);
+            Panel configBorder = Ctrl.Bordered(_config);
+            configBorder.Location = new Point(13, 75);
+            configBorder.Size = new Size(494, 314);
+            configBorder.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
 
             _regularFont = new Font(_config.Font, FontStyle.Regular);
             _boldFont = new Font(_config.Font, FontStyle.Bold);
@@ -103,6 +110,7 @@ namespace WgSharp.Ui
                 Size = new Size(88, 28),
                 Anchor = AnchorStyles.Bottom | AnchorStyles.Right
             };
+            Ctrl.FlattenButton(btnSave, true);
             var btnCancel = new Button
             {
                 Text = "Cancel",
@@ -110,23 +118,23 @@ namespace WgSharp.Ui
                 Size = new Size(88, 28),
                 Anchor = AnchorStyles.Bottom | AnchorStyles.Right
             };
+            Ctrl.FlattenButton(btnCancel, false);
             btnSave.Location = new Point(ClientSize.Width - 2 * 94 - 14, ClientSize.Height - 38);
             btnCancel.Location = new Point(ClientSize.Width - 94 - 8, ClientSize.Height - 38);
 
-            _blockUntunneled = new CheckBox
+            _blockUntunneled = new ThemedCheckBox
             {
                 Text = "Block untunneled traffic (kill-switch)",
                 Location = new Point(14, ClientSize.Height - 34),
                 Size = new Size(280, 22),
-                Anchor = AnchorStyles.Bottom | AnchorStyles.Left,
-                ForeColor = Color.FromArgb(0x20, 0x20, 0x20)
+                Anchor = AnchorStyles.Bottom | AnchorStyles.Left
             };
 
             Controls.Add(lblName);
             Controls.Add(_name);
             Controls.Add(lblPub);
             Controls.Add(_pubKeyValue);
-            Controls.Add(_config);
+            Controls.Add(configBorder);
             Controls.Add(_blockUntunneled);
             Controls.Add(btnSave);
             Controls.Add(btnCancel);
@@ -302,13 +310,13 @@ namespace WgSharp.Ui
                 {
                     byte[] pub = WgSharp.Crypto.Curve25519.ScalarMultBase(priv);
                     _pubKeyValue.Text = Convert.ToBase64String(pub);
-                    _pubKeyValue.ForeColor = Color.FromArgb(0x20, 0x20, 0x20);
+                    _pubKeyValue.ForeColor = AppTheme.FieldValue;
                     return;
                 }
                 catch { }
             }
             _pubKeyValue.Text = "(set a valid PrivateKey)";
-            _pubKeyValue.ForeColor = Color.FromArgb(0x99, 0x99, 0x99);
+            _pubKeyValue.ForeColor = AppTheme.FieldLabel;
         }
 
         // Pull the PrivateKey value from the [Interface] section and decode it,
@@ -354,7 +362,7 @@ namespace WgSharp.Ui
 
             _config.SelectionStart = selStart;
             _config.SelectionLength = selLen;
-            _config.SelectionColor = ColDefault;
+            _config.SelectionColor = AppTheme.SyntaxDefault;
             _config.ResumeLayout();
             _highlighting = false;
         }
@@ -366,26 +374,26 @@ namespace WgSharp.Ui
 
             if (trimmed.StartsWith("#") || trimmed.StartsWith(";"))
             {
-                Apply(offset, line.Length, ColComment, false);
+                Apply(offset, line.Length, AppTheme.SyntaxComment, false);
                 return;
             }
             if (trimmed.StartsWith("[") )
             {
-                Apply(offset, line.Length, ColSection, true);
+                Apply(offset, line.Length, AppTheme.SyntaxSection, true);
                 return;
             }
 
             int eq = line.IndexOf('=');
             if (eq < 0)
             {
-                Apply(offset, line.Length, ColDefault, false);
+                Apply(offset, line.Length, AppTheme.SyntaxDefault, false);
                 return;
             }
 
             // key (up to '='), the '=' and value
-            Apply(offset, eq, ColKey, true);
-            Apply(offset + eq, 1, ColDefault, false);             // the '='
-            Apply(offset + eq + 1, line.Length - eq - 1, ColValue, false);
+            Apply(offset, eq, AppTheme.SyntaxKey, true);
+            Apply(offset + eq, 1, AppTheme.SyntaxDefault, false);             // the '='
+            Apply(offset + eq + 1, line.Length - eq - 1, AppTheme.SyntaxValue, false);
         }
 
         private void Apply(int start, int length, Color color, bool bold)

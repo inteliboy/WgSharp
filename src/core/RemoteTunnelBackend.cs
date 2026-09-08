@@ -17,13 +17,6 @@ namespace WgSharp.Core
     public sealed class RemoteTunnelBackend : ITunnelBackend
     {
         public event Action<string> LogMessage;
-        /// <summary>
-        /// Pre-stamped service log lines forwarded to the GUI (see
-        /// PumpServiceLog). Distinct from LogMessage because these already
-        /// carry the service's own timestamp and shouldn't be re-stamped by
-        /// the GUI's normal Log path.
-        /// </summary>
-        public event Action<string> ServiceLogLine;
         private readonly string _name;
         private readonly string _portableConfigText; // non-null => ACTIVATE2 (portable tunnel, decrypted by the GUI)
 
@@ -137,69 +130,5 @@ namespace WgSharp.Core
         }
 
         private bool _loggedFirstStatus;
-
-        // Tracks how much of the service's in-memory log we've already
-        // forwarded to the GUI's Log tab, so PumpServiceLog only emits lines
-        // that are genuinely new. The service stamps every line with a
-        // millisecond timestamp, so exact-string dedup against the last line
-        // we showed is reliable even when several lines share a second.
-        private string _lastServiceLogLine;
-
-        /// <summary>
-        /// Pulls the service's recent in-memory log over the pipe and forwards
-        /// any lines newer than the last one we've already shown into the GUI's
-        /// Log tab (via LogMessage). Cheap STATUS-class pipe call; the GUI
-        /// invokes it from its once-per-second status tick while a
-        /// service-driven tunnel is active, so service activity shows up in the
-        /// same Log tab as everything else — no service.log file needed.
-        /// The lines already carry their own component tags and (when present)
-        /// debug markers, so the GUI's normal filter applies to them too.
-        /// </summary>
-        public void PumpServiceLog()
-        {
-            string[] lines;
-            try { lines = ServiceClient.FetchServiceLog(); }
-            catch { return; }
-            if (lines == null || lines.Length == 0) return;
-
-            int startAt = 0;
-            if (_lastServiceLogLine != null)
-            {
-                // Find the last line we already showed; emit everything after it.
-                for (int i = lines.Length - 1; i >= 0; i--)
-                {
-                    if (lines[i] == _lastServiceLogLine) { startAt = i + 1; break; }
-                }
-            }
-
-            var h = ServiceLogLine;
-            for (int i = startAt; i < lines.Length; i++)
-            {
-                string ln = lines[i];
-                if (ln.Length == 0) continue;
-                if (h != null) h(FormatForwarded(ln));
-            }
-            _lastServiceLogLine = lines[lines.Length - 1];
-        }
-
-        // Service ring lines look like "2026-... HH:mm:ss.fff <message>" — the
-        // timestamp is already first. We insert a "[Service]" tag AFTER the
-        // timestamp (not before it), so the GUI Log tab keeps date/time first
-        // for every line, with the brackets after: "2026-... [Service] <msg>".
-        private static string FormatForwarded(string ringLine)
-        {
-            // The service stamp is "yyyy-MM-dd HH:mm:ss.fff " = 23 chars + a
-            // space before the message. Split on the first 24 chars if it looks
-            // like a timestamp; otherwise just prefix the tag.
-            const int stampLen = 23; // "2026-06-29 13:03:33.597"
-            if (ringLine.Length > stampLen + 1 &&
-                ringLine[4] == '-' && ringLine[7] == '-' && ringLine[13] == ':')
-            {
-                string stamp = ringLine.Substring(0, stampLen);
-                string rest = ringLine.Substring(stampLen).TrimStart();
-                return stamp + " [Service] " + rest;
-            }
-            return "[Service] " + ringLine;
-        }
     }
 }

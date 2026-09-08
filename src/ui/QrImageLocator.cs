@@ -69,11 +69,12 @@ namespace WgSharp.Ui
                     for (int c = 0; c < n; c++)
                     {
                         if (c == a || c == b) continue;
-                        bool[,] grid = SampleGrid(dark, w, h, candidates[a], candidates[b], candidates[c]);
-                        if (grid == null) continue;
-                        gridsSampled++;
-                        string text = QrCode.Decode(grid);
-                        if (text != null) return text;
+                        foreach (bool[,] grid in SampleGrids(dark, w, h, candidates[a], candidates[b], candidates[c]))
+                        {
+                            gridsSampled++;
+                            string text = QrCode.Decode(grid);
+                            if (text != null) return text;
+                        }
                     }
                 }
             }
@@ -197,8 +198,24 @@ namespace WgSharp.Ui
             foreach (float[] cl in clusters)
             {
                 float refinedY;
-                if (VerticalCrossCheck(dark, w, h, (int)Math.Round(cl[0]), (int)Math.Round(cl[1]), cl[2], out refinedY))
-                    confirmed.Add(new float[] { cl[0], refinedY, cl[2], cl[3] }); // {x, y, moduleSize, confidence}
+                if (!VerticalCrossCheck(dark, w, h, (int)Math.Round(cl[0]), (int)Math.Round(cl[1]), cl[2], out refinedY))
+                    continue;
+
+                // The X estimate up to this point is just the raw-hit
+                // cluster centroid from the horizontal scan pass - under
+                // rotation, different scanlines cross a tilted finder
+                // pattern at different apparent X positions, and naively
+                // averaging them (ClusterPoints) doesn't reliably land on
+                // the true center (confirmed via a synthetic round-trip
+                // test: one finder's X came out ~1.4 modules off, enough by
+                // itself to misalign the whole affine grid). Symmetric fix:
+                // now that Y is refined, cross-check back along THAT row to
+                // refine X the same way VerticalCrossCheck refined Y.
+                float refinedX;
+                if (!HorizontalCrossCheck(dark, w, h, (int)Math.Round(refinedY), (int)Math.Round(cl[0]), cl[2], out refinedX))
+                    refinedX = cl[0]; // fall back to the centroid rather than dropping an otherwise-valid candidate
+
+                confirmed.Add(new float[] { refinedX, refinedY, cl[2], cl[3] }); // {x, y, moduleSize, confidence}
             }
             // Strongest (most row-hits) first, so a downstream cap on how
             // many candidates we permute keeps the real finders, not noise.
@@ -246,6 +263,51 @@ namespace WgSharp.Ui
             return true;
         }
 
+        // Mirrors VerticalCrossCheck exactly, swapping axes: scans row y0
+        // instead of column x0, to refine an X estimate. See the call site's
+        // comment in FindFinderCandidates for why a single horizontal pass
+        // alone (with no reciprocal horizontal check after Y is refined)
+        // isn't enough under rotation.
+        private static bool HorizontalCrossCheck(bool[,] dark, int w, int h, int y0, int x0, float unitEstimate, out float refinedX)
+        {
+            refinedX = x0;
+            if (y0 < 0 || y0 >= h) return false;
+            int searchHalf = (int)Math.Max(10, unitEstimate * 6);
+            int xStart = Math.Max(0, x0 - searchHalf), xEnd = Math.Min(w - 1, x0 + searchHalf);
+
+            List<int> starts = new List<int>();
+            List<int> lens = new List<int>();
+            List<bool> colors = new List<bool>();
+            int x = xStart;
+            while (x <= xEnd)
+            {
+                bool color = dark[y0, x];
+                int start = x;
+                while (x <= xEnd && dark[y0, x] == color) x++;
+                starts.Add(start); lens.Add(x - start); colors.Add(color);
+            }
+            int n = lens.Count;
+            float bestDist = float.MaxValue, bestCenter = -1;
+            for (int i = 0; i + 4 < n; i++)
+            {
+                if (!(colors[i] && !colors[i + 1] && colors[i + 2] && !colors[i + 3] && colors[i + 4])) continue;
+                int l0 = lens[i], l1 = lens[i + 1], l2 = lens[i + 2], l3 = lens[i + 3], l4 = lens[i + 4];
+                float unit = (l0 + l1 + l3 + l4) / 4f;
+                if (unit < 1f) continue;
+                if (!InRange(l0, unit, 0.5f, 1.6f)) continue;
+                if (!InRange(l1, unit, 0.5f, 1.6f)) continue;
+                if (!InRange(l3, unit, 0.5f, 1.6f)) continue;
+                if (!InRange(l4, unit, 0.5f, 1.6f)) continue;
+                if (!InRange(l2, unit * 3f, 0.6f, 1.6f)) continue;
+                float center = starts[i + 2] + l2 / 2f;
+                float distFromOrig = Math.Abs(center - x0);
+                if (distFromOrig < bestDist) { bestDist = distFromOrig; bestCenter = center; }
+            }
+            if (bestCenter < 0) return false;
+            refinedX = bestCenter;
+            return true;
+        }
+
         private static bool InRange(float v, float refVal, float lo, float hi)
         {
             return v >= refVal * lo && v <= refVal * hi;
@@ -284,54 +346,95 @@ namespace WgSharp.Ui
         // Builds an affine basis from the three finder centers — pivot ("TL")
         // and the two others ("TR"/"BL", whichever way they actually are —
         // the class doc comment on why we don't bother determining that here
-        // — and samples the module grid. Returns null on any geometry that's
-        // clearly not a real QR (size out of range, sample point outside the
-        // frame, wildly unequal side lengths).
-        private static bool[,] SampleGrid(bool[,] dark, int w, int h, float[] tl, float[] tr, float[] bl)
+        // — and samples the module grid at each plausible size (see
+        // SizeCandidates). Returns no grids at all on geometry that's clearly
+        // not a real QR (size out of range, sample point outside the frame,
+        // wildly unequal side lengths).
+        //
+        // Sizing itself is the fiddly part: the per-finder "unit" (module
+        // pixel size) that SizeCandidates' caller would otherwise divide by
+        // is measured along a horizontal/vertical scanline through the
+        // pattern (FindFinderCandidates/VerticalCrossCheck) — for an
+        // in-plane-ROTATED code, that scanline cuts across the tilted
+        // pattern at an angle, so it overestimates the true edge-to-edge
+        // module size (by roughly 1/cos(rotation), a few percent even for a
+        // modest few-degree tilt someone holding up a phone will easily
+        // produce). That bias, combined with the size formula's rounding
+        // landing near a version-boundary, was previously enough to guess
+        // one whole QR version off - which is fatal (every fixed-position
+        // element - format info, alignment/timing patterns, the codeword
+        // zigzag - reads from the wrong place, so no amount of Reed-Solomon
+        // correction downstream can recover it), even though the actual
+        // finder-triple geometry was completely correct. Confirmed via a
+        // synthetic round-trip test (encode -> render -> rotate/resize ->
+        // decode): forcing the correct size decoded successfully every time
+        // the single best-guess size failed.
+        private static IEnumerable<bool[,]> SampleGrids(bool[,] dark, int w, int h, float[] tl, float[] tr, float[] bl)
         {
             float dxTR = tr[0] - tl[0], dyTR = tr[1] - tl[1];
             float dxBL = bl[0] - tl[0], dyBL = bl[1] - tl[1];
             float distTR = (float)Math.Sqrt(dxTR * dxTR + dyTR * dyTR);
             float distBL = (float)Math.Sqrt(dxBL * dxBL + dyBL * dyBL);
-            if (distTR < 1f || distBL < 1f) return null;
+            if (distTR < 1f || distBL < 1f) yield break;
             // A real QR's two finder-to-finder sides are equal length; reject
             // wildly unequal triples cheaply before doing a full grid sample.
-            if (distBL < distTR * 0.4f || distBL > distTR * 2.5f) return null;
+            if (distBL < distTR * 0.4f || distBL > distTR * 2.5f) yield break;
 
             float avgModulePx = (tl[2] + tr[2] + bl[2]) / 3f;
-            if (avgModulePx < 0.5f) return null;
+            if (avgModulePx < 0.5f) yield break;
 
+            foreach (int size in SizeCandidates(distTR, avgModulePx))
+            {
+                int modulesPerSide = size - 7;
+                float xAxisX = dxTR / modulesPerSide, xAxisY = dyTR / modulesPerSide;
+                float yAxisX = dxBL / modulesPerSide, yAxisY = dyBL / modulesPerSide;
+
+                // origin = pixel position of module (0,0)'s corner. The finder
+                // pattern's own center sits at module coordinate (3.5, 3.5)
+                // from that corner along each axis (see
+                // QrCode.DrawFunctionPatterns: finder eyes are centered at
+                // module index 3 on a 7-wide pattern).
+                float originX = tl[0] - 3.5f * xAxisX - 3.5f * yAxisX;
+                float originY = tl[1] - 3.5f * xAxisY - 3.5f * yAxisY;
+
+                bool[,] grid = new bool[size, size];
+                bool outOfBounds = false;
+                for (int r = 0; r < size && !outOfBounds; r++)
+                {
+                    for (int c = 0; c < size; c++)
+                    {
+                        float px = originX + (c + 0.5f) * xAxisX + (r + 0.5f) * yAxisX;
+                        float py = originY + (c + 0.5f) * xAxisY + (r + 0.5f) * yAxisY;
+                        int ix = (int)Math.Round(px), iy = (int)Math.Round(py);
+                        if (ix < 0 || iy < 0 || ix >= w || iy >= h) { outOfBounds = true; break; }
+                        grid[r, c] = dark[iy, ix];
+                    }
+                }
+                if (!outOfBounds) yield return grid;
+            }
+        }
+
+        // A small window of plausible QR sizes (21, 25, 29, ... 177) around
+        // the geometry's best estimate, instead of committing to a single
+        // rounded guess - see SampleGrids' comment for why the single-guess
+        // version was fragile under rotation. Tries the best guess first
+        // (the common, unrotated/well-aligned case still resolves on the
+        // first attempt), then its immediate smaller/larger neighbors.
+        private static IEnumerable<int> SizeCandidates(float distTR, float avgModulePx)
+        {
             float modulesAcross = distTR / avgModulePx; // ~= size - 7
             int sizeGuess = (int)Math.Round(modulesAcross) + 7;
-            int k = (int)Math.Round((sizeGuess - 17) / 4.0);
-            if (k < 1) k = 1;
-            if (k > 40) k = 40;
-            int size = 17 + 4 * k;
-            int modulesPerSide = size - 7;
+            int kGuess = (int)Math.Round((sizeGuess - 17) / 4.0);
 
-            float xAxisX = dxTR / modulesPerSide, xAxisY = dyTR / modulesPerSide;
-            float yAxisX = dxBL / modulesPerSide, yAxisY = dyBL / modulesPerSide;
-
-            // origin = pixel position of module (0,0)'s corner. The finder
-            // pattern's own center sits at module coordinate (3.5, 3.5) from
-            // that corner along each axis (see QrCode.DrawFunctionPatterns:
-            // finder eyes are centered at module index 3 on a 7-wide pattern).
-            float originX = tl[0] - 3.5f * xAxisX - 3.5f * yAxisX;
-            float originY = tl[1] - 3.5f * xAxisY - 3.5f * yAxisY;
-
-            bool[,] grid = new bool[size, size];
-            for (int r = 0; r < size; r++)
+            int[] offsets = { 0, -1, 1 };
+            var seen = new HashSet<int>();
+            foreach (int off in offsets)
             {
-                for (int c = 0; c < size; c++)
-                {
-                    float px = originX + (c + 0.5f) * xAxisX + (r + 0.5f) * yAxisX;
-                    float py = originY + (c + 0.5f) * xAxisY + (r + 0.5f) * yAxisY;
-                    int ix = (int)Math.Round(px), iy = (int)Math.Round(py);
-                    if (ix < 0 || iy < 0 || ix >= w || iy >= h) return null;
-                    grid[r, c] = dark[iy, ix];
-                }
+                int k = kGuess + off;
+                if (k < 1) k = 1;
+                if (k > 40) k = 40;
+                if (seen.Add(k)) yield return 17 + 4 * k;
             }
-            return grid;
         }
     }
 }

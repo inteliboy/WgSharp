@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Net;
 using System.Reflection;
 using System.Text.RegularExpressions;
@@ -24,13 +25,21 @@ namespace WgSharp.Core
         private const string LatestApi = "https://api.github.com/repos/inteliboy/WgSharp/releases/latest";
         private const string TagUrlPrefix = "https://github.com/inteliboy/WgSharp/releases/tag/";
 
-        /// <summary>The outcome of a check. IsUpdateAvailable is the only field that matters to callers.</summary>
+        // The asset name build.cmd's NSIS step produces (installer\WgSharp.nsi's
+        // OutFile) and that every published release is expected to attach under
+        // this exact name - lets a caller offer "download and install" directly
+        // instead of just opening the release page and making the user find and
+        // run it themselves.
+        public const string InstallerAssetName = "WgSharp-Setup.exe";
+
+        /// <summary>The outcome of a check. IsUpdateAvailable is the only field that matters to most callers.</summary>
         public sealed class Result
         {
             public bool IsUpdateAvailable;
             public string CurrentVersion;   // e.g. "1.26.0629"
             public string LatestVersion;    // e.g. "1.26.0704", or null on failure/no-newer
             public string ReleaseUrl;       // tag page for the latest, else the releases index
+            public string InstallerDownloadUrl; // direct download URL for InstallerAssetName, or null if the release has no such asset
         }
 
         /// <summary>
@@ -77,6 +86,7 @@ namespace WgSharp.Core
 
                 r.LatestVersion = latestTag;
                 r.ReleaseUrl = TagUrlPrefix + latestTag;
+                r.InstallerDownloadUrl = ExtractAssetDownloadUrl(json, InstallerAssetName);
 
                 if (CompareVersions(latestTag, r.CurrentVersion) > 0)
                     r.IsUpdateAvailable = true;
@@ -148,6 +158,69 @@ namespace WgSharp.Core
             Match m = Regex.Match(json, "\"tag_name\"\\s*:\\s*\"v?([^\"]+)\"");
             if (!m.Success) return null;
             return NormalizeVersion(m.Groups[1].Value);
+        }
+
+        // Pulls the browser_download_url for one named asset out of the
+        // releases/latest JSON's "assets" array, again without a JSON library.
+        // GitHub's API always emits an asset's "name" field before its own
+        // "browser_download_url" within that same (flat, no nested {}) asset
+        // object, so a bounded non-greedy scan forward from the name match -
+        // stopping at the next "{"/"}" - reliably stays within the matched
+        // asset's own object instead of spilling into a neighboring one.
+        private static string ExtractAssetDownloadUrl(string json, string assetName)
+        {
+            if (string.IsNullOrEmpty(json)) return null;
+            string pattern = "\"name\"\\s*:\\s*\"" + Regex.Escape(assetName) +
+                              "\"[^{}]*?\"browser_download_url\"\\s*:\\s*\"([^\"]+)\"";
+            Match m = Regex.Match(json, pattern);
+            return m.Success ? m.Groups[1].Value : null;
+        }
+
+        /// <summary>
+        /// Downloads the installer asset to a temp file on a background thread
+        /// and reports the result. onComplete gets (localPath, null) on success
+        /// or (null, exception) on failure; it runs on the thread-pool thread,
+        /// same as CheckAsync's callback, so a WinForms caller must marshal back
+        /// to the UI thread itself. Never throws.
+        /// </summary>
+        public static void DownloadInstallerAsync(string url, Action<string, Exception> onComplete)
+        {
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string path = null;
+                Exception error = null;
+                try
+                {
+                    try { ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072; } catch { }
+                    path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), InstallerAssetName);
+                    using (var client = new WebClient())
+                    {
+                        client.Headers.Add("User-Agent", "WgSharp/" + CurrentVersion());
+                        client.DownloadFile(url, path);
+                    }
+                }
+                catch (Exception ex) { error = ex; path = null; }
+                try { if (onComplete != null) onComplete(path, error); }
+                catch { /* caller's callback isn't our problem */ }
+            });
+        }
+
+        /// <summary>
+        /// Launches a downloaded WgSharp-Setup.exe silently ("/S" — no wizard,
+        /// no Finish page, just install-and-relaunch; see installer\WgSharp.nsi).
+        /// UseShellExecute=true is required, not just the default: Setup's own
+        /// manifest requests requireAdministrator, and ShellExecute is what
+        /// makes Windows honor that and show the UAC prompt for the CHILD
+        /// process regardless of this (asInvoker) process's own elevation
+        /// level — a raw CreateProcess (UseShellExecute=false) would instead
+        /// just fail outright. Throws on failure so the caller can fall back
+        /// to opening the release page.
+        /// </summary>
+        public static void LaunchInstallerSilently(string installerPath)
+        {
+            var psi = new ProcessStartInfo(installerPath, "/S");
+            psi.UseShellExecute = true;
+            Process.Start(psi);
         }
 
         /// <summary>

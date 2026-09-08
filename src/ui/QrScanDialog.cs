@@ -11,11 +11,13 @@ namespace WgSharp.Ui
     /// WireGuard mobile app). On success, <see cref="DecodedText"/> holds the
     /// plain .conf text and ShowDialog returns DialogResult.OK.
     ///
-    /// Webcam capture uses the legacy VFW API (see WebcamCapture) and is
-    /// genuinely best-effort — some cameras/drivers don't expose it. If no
-    /// capture driver is found at all, or the live attempt fails, this falls
-    /// back to letting the user pick an image file (a screenshot or photo of
-    /// the QR) and decodes that instead, so the feature still works either way.
+    /// Webcam capture uses a hand-built DirectShow capture graph (see
+    /// WebcamCapture) and is genuinely best-effort — some cameras/drivers
+    /// don't expose a DirectShow source, and Windows' camera privacy setting
+    /// can block it even when they do. If no capture device is found at all,
+    /// or the live attempt fails, this falls back to letting the user pick
+    /// an image file (a screenshot or photo of the QR) and decodes that
+    /// instead, so the feature still works either way.
     /// </summary>
     public sealed class QrScanDialog : Form
     {
@@ -41,17 +43,15 @@ namespace WgSharp.Ui
         private bool _busy; // re-entrancy guard: skip a tick if the previous decode attempt is still running
 
         // How many consecutive grabbed frames came back essentially blank
-        // (see IsLikelyBlank). The live preview rendering INTO _previewHost is
-        // drawn directly by the OS/driver — we never see those pixels — so
-        // this is judged from the stills GrabFrame already pulls every tick
-        // for decoding, not from the preview itself. A handful of blank
-        // frames in a row (not just one — the very first frame or two can
-        // legitimately be black while the sensor warms up) is the strong,
-        // specific signature of Windows' camera privacy permission blocking
-        // desktop-app camera access: the legacy capture API connects
-        // successfully (so Start() doesn't throw and the LED lights up), but
-        // the modern Frame Server sitting underneath withholds the actual
-        // image data instead of failing the call outright.
+        // (see IsLikelyBlank), judged from the stills GrabFrame already pulls
+        // every tick for decoding. A handful of blank frames in a row (not
+        // just one - the very first frame or two can legitimately be black
+        // while the sensor warms up) is the strong, specific signature of
+        // Windows' camera privacy permission blocking desktop-app camera
+        // access: the capture graph connects and negotiates successfully (so
+        // Start() doesn't throw and the LED lights up), but the modern Frame
+        // Server sitting underneath withholds the actual image data instead
+        // of failing the call outright.
         private int _consecutiveBlankFrames;
         // The timer now ticks ~every 150ms (fast, for a smooth preview). All
         // thresholds below are in ticks at that interval.
@@ -72,7 +72,17 @@ namespace WgSharp.Ui
             ShowInTaskbar = false;
             Font = new Font("Segoe UI", 9F);
             ClientSize = new Size(420, 462);
+            BackColor = AppTheme.WindowBg;
+            HandleCreated += delegate
+            {
+                NativeMethods.SetDarkTitleBar(Handle, AppTheme.IsDark);
+                NativeMethods.SetBorderAndCaptionColor(Handle,
+                    AppTheme.IsDark ? AppTheme.Border : Color.Empty,
+                    AppTheme.IsDark ? AppTheme.Surface : Color.Empty);
+            };
 
+            // The camera preview panel stays black regardless of theme - it's
+            // the live video feed, not app chrome.
             _previewHost = new Panel
             {
                 Location = new Point(16, 16),
@@ -82,10 +92,10 @@ namespace WgSharp.Ui
             };
 
             // We draw the live preview ourselves into this PictureBox from the
-            // frames the capture callback delivers, rather than relying on
-            // VFW's own preview rendering into the host panel (which is
-            // unreliable across cameras/drivers). The PictureBox fills the
-            // host panel and sits ON TOP of wherever VFW might also be drawing.
+            // frames the Sample Grabber callback delivers - the capture graph
+            // has no window-embedding concept in how this app uses it (it
+            // renders to a Null Renderer, not a video window), so the
+            // PictureBox is the only rendering of the feed that exists.
             _preview = new PictureBox
             {
                 Dock = DockStyle.Fill,
@@ -99,7 +109,7 @@ namespace WgSharp.Ui
                 Text = "Starting the camera\u2026",
                 Location = new Point(16, 344),
                 Size = new Size(388, 50),
-                ForeColor = Color.FromArgb(0x44, 0x44, 0x44)
+                ForeColor = AppTheme.FieldValue
             };
 
             // Hidden until a likely permission block is detected (see
@@ -114,6 +124,7 @@ namespace WgSharp.Ui
                 Visible = false
             };
             _btnPrivacy.Click += OnOpenPrivacySettings;
+            Ctrl.FlattenButton(_btnPrivacy, false);
 
             _btnFile = new Button
             {
@@ -122,6 +133,7 @@ namespace WgSharp.Ui
                 Size = new Size(180, 28)
             };
             _btnFile.Click += OnScanFromFile;
+            Ctrl.FlattenButton(_btnFile, false);
 
             _btnCancel = new Button
             {
@@ -130,6 +142,7 @@ namespace WgSharp.Ui
                 Location = new Point(316, 428),
                 Size = new Size(88, 28)
             };
+            Ctrl.FlattenButton(_btnCancel, false);
 
             Controls.Add(_previewHost);
             Controls.Add(_status);
@@ -155,9 +168,10 @@ namespace WgSharp.Ui
             // line after this one IS debug-marked (via WebcamCapture and the
             // _cam.Log forward), so those need Debug log ON to appear.
             L("QR scanner opened (this line shows regardless of Debug log).");
-            if (!WebcamCapture.AnyDriverAvailable())
+            string driverDiagnostic;
+            if (!WebcamCapture.AnyDriverAvailable(out driverDiagnostic))
             {
-                L("AnyDriverAvailable() = false; no legacy capture driver present.");
+                L("AnyDriverAvailable() = false (" + driverDiagnostic + ").");
                 _status.Text = "No webcam was found (or this camera doesn't support the legacy " +
                     "capture API WgSharp uses). You can still scan from a saved image instead.";
                 return;
@@ -317,7 +331,7 @@ namespace WgSharp.Ui
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this,
+                ThemedMessageBox.Show(this,
                     "Couldn't open Settings automatically (" + ex.Message + ").\n\n" +
                     "Open it manually: Settings \u2192 Privacy & security \u2192 Camera, and make sure " +
                     "\"Camera access\" and \"Let desktop apps access your camera\" are both turned on.",
@@ -342,7 +356,7 @@ namespace WgSharp.Ui
                         string text = QrImageLocator.TryDecodeFrame(img, out diagnostic);
                         if (text == null)
                         {
-                            MessageBox.Show(this, "Couldn't find a readable QR code in that image.\n\n" +
+                            ThemedMessageBox.Show(this, "Couldn't find a readable QR code in that image.\n\n" +
                                 (diagnostic ?? "No further detail available."),
                                 "WgSharp", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                             return;
@@ -354,7 +368,7 @@ namespace WgSharp.Ui
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show(this, "Couldn't read that image: " + ex.Message, "WgSharp",
+                    ThemedMessageBox.Show(this, "Couldn't read that image: " + ex.Message, "WgSharp",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }

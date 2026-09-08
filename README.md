@@ -60,14 +60,14 @@ transport data path. A WinForms GUI. All compiled with `csc.exe` alone —
 | 🌐 **Split-tunnel DNS auto-fix** | If the configured DNS server isn't covered by AllowedIPs, WgSharp automatically routes it through the tunnel so DNS works without requiring manual config changes. |
 | 🧯 **Self-authorizing firewall rules** | The one-time setup pre-registers the exe with Windows Firewall, so the interactive "allow this app" prompt never interrupts you. |
 | 🚀 **Background service** | Reconnects your last tunnel *before login*, the same model the official client uses — a real `LocalSystem` service with the GUI as a thin client over a named pipe. |
-| 🙅 **No UAC prompt on launch** | The installed GUI runs unelevated (`asInvoker`). The MSI registers and starts the background service at install time, so an MSI install never prompts on launch at all; a non-MSI installed copy sets the service up on first Activate via a single UAC prompt. Portable mode instead asks you to run it as administrator (see [Portable mode](#portable-mode-and-passwords)). |
+| 🙅 **No UAC prompt on launch** | The installed GUI runs unelevated (`asInvoker`). Setup registers the background service at install time (it's already elevated), so an installed copy never prompts on launch at all; a non-installed copy sets the service up on first Activate via a single UAC prompt. Portable mode instead asks you to run it as administrator (see [Portable mode](#portable-mode-and-passwords)). |
 | 🖥️ **GUI autostart** | Optionally launches the tray app at login too, independent of the boot-time service. |
 | 📦 **Drag-and-drop import** | `.conf` / `.zip` / `.wgsp` straight onto the tunnel list. |
 | 🔒 **Portable mode** | Password-encrypted configs that travel with the app folder, with per-tunnel passwords cached for the session. |
 | 📊 **Live stats** | Upload/download charts, session duration, total transferred, and tunnel latency. |
 | ✍️ **Config editor** | Syntax highlighting, a live-derived public key, and QR export. |
-| 📷 **Scan from QR code** *(experimental)* | Add a tunnel by pointing the webcam at a QR code (or scanning a saved image) — a from-scratch QR decoder, no external library. Enabled via **Settings → Show experimental features**. |
-| 🔔 **Update notifications** | Quietly checks GitHub at startup for a newer release and shows a clickable tray notification if one exists; you can also check on demand from the **About** dialog or the tray menu. Informational only — never auto-downloads. Opt out of the startup check via **Settings → Check for updates**. |
+| 📷 **Scan from QR code** | Add a tunnel by pointing the webcam at a QR code (or scanning a saved image) — a from-scratch QR decoder, no external library. |
+| 🔔 **Update notifications** | Quietly checks GitHub at startup for a newer release and shows a clickable tray notification if one exists; you can also check on demand from the **About** dialog or the tray menu. If the release has a Setup installer attached, one click downloads and installs it silently (no wizard) and restarts WgSharp; otherwise it opens the release page instead. Opt out of the startup check via **Settings → Check for updates**. |
 | 🧰 **System tray** | Live status tooltip, quick-connect menu, closing the window minimizes instead of exiting. |
 | ℹ️ **About dialog** | Version, GitHub link, Buy Me a Coffee support link, and a **Check for Updates** button — reachable from the window's system menu and the tray menu. |
 
@@ -105,18 +105,15 @@ every run, not checked into source control). No separate version number to
 remember to bump: build it today, it's today's date; build it again next
 month, it's that date.
 
-There isn't one identical version string used absolutely everywhere, because
-Windows Installer's `ProductVersion` field is a hard wall: it's strictly
-3-part (`major.minor.build`) and WiX rejects a 4th field outright, while
-.NET's `AssemblyVersion`/`AssemblyFileVersion` are 4-part. So `build.cmd`
-computes ONE date encoding and uses it in the two forms Windows allows:
+There isn't one identical version string used absolutely everywhere: `build.cmd`
+computes ONE date encoding and uses it in two forms —
 
-- **`1.YY.MMDD`** (3 fields) for the MSI's `ProductVersion` and the release
-  tag / portable-zip name.
+- **`1.YY.MMDD`** (3 fields) for the release tag, the portable-zip name, and
+  the Setup installer's own `DisplayVersion` shown in Add/Remove Programs.
 - **`1.YY.MMDD.0`** (4 fields) for the exe's `AssemblyVersion`,
-  `AssemblyFileVersion`, and `AssemblyInformationalVersion` — e.g.
-  `1.26.0629.0` for 2026-06-29. The trailing `.0` is a fixed placeholder
-  revision field.
+  `AssemblyFileVersion`, and `AssemblyInformationalVersion`, and for the
+  Setup installer's own Win32 version resource — e.g. `1.26.0629.0` for
+  2026-06-29. The trailing `.0` is a fixed placeholder revision field.
 
 The in-app update check compares the exe's version (normalized to `1.YY.MMDD`)
 against the latest GitHub release tag. This assumes **at most one release per
@@ -133,49 +130,47 @@ fields), so the year is shortened to its last two digits (`YY`, good until
 correctness: without it, month 1/day 23 and month 12/day 3 would both
 produce the same digits ("123").
 
-### MSI installer (optional)
+### Setup installer (optional)
 
-If [WiX Toolset v3.14](https://wixtoolset.org/) is installed, `build.cmd` also
-produces `bin\amd64\WgSharp-Setup.msi` right after the exe — installs to a
+If [NSIS](https://nsis.sourceforge.io/) is installed, `build.cmd` also
+produces `bin\amd64\WgSharp-Setup.exe` right after the exe — installs to a
 **fixed** location, `Program Files\WgSharp` (there's no "choose a folder"
-dialog; see why below), adds a Start Menu shortcut, and registers normally in
-Add/Remove Programs. The source is `installer\Product.wxs`, built directly
-with `candle.exe`/`light.exe` (no Visual Studio WiX project, same
-no-MSBuild philosophy as the rest of the build).
+page; see why below), adds a Start Menu shortcut (plus an uninstall shortcut
+next to it), and registers normally in Add/Remove Programs. The source is
+`installer\WgSharp.nsi`, built directly with `makensis.exe` (no separate
+installer project, same no-MSBuild philosophy as the rest of the build).
+Setup requires administrator rights (its manifest requests
+`requireAdministrator`, so Windows prompts for elevation automatically
+whether you double-click it or it's launched programmatically) — it needs
+that to write to `Program Files` and register the background service.
 
-To get it: download and run
-[**wix314.exe**](https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314.exe)
-from the
-[wixtoolset/wix3 releases page](https://github.com/wixtoolset/wix3/releases)
-(the v3.14.1 RTM build — that's a "v3", not the newer, MSBuild-based WiX v4/v5,
-which works differently and isn't what `build.cmd` looks for). It's a normal
-installer; nothing else to configure afterward — `build.cmd` finds it
-automatically via the `%WIX%` environment variable that installer sets.
+To get it: install NSIS from the
+[NSIS downloads page](https://nsis.sourceforge.io/Download) — a normal
+installer, nothing else to configure afterward. `build.cmd` finds
+`makensis.exe` automatically via the `%NSISDIR%` environment variable (if
+set) or the usual Program Files install path.
 
-This step is **best-effort**: if WiX isn't found (checked via that `%WIX%`
-environment variable, then the usual Program Files path), `build.cmd` skips
-it with a clear `[SKIP]` message and the exe build above is unaffected either
-way — the MSI is a convenience, not a requirement.
+This step is **best-effort**: if NSIS isn't found, `build.cmd` skips it with
+a clear `[SKIP]` message and the exe build above is unaffected either way —
+Setup is a convenience, not a requirement.
 
-**Optional code signing.** After building the exe (and, if present, the MSI),
+**Optional code signing.** After building the exe (and, if built, Setup),
 `build.cmd` Authenticode-signs both if a code-signing certificate is installed
 — matched by subject substring (default `SMCE`; override with the `SIGN_CERT`
 environment variable) the same way `signtool /n` matches. It signs the exe
-*before* the MSI is built so the installer packs the signed binary. This is
-entirely self-disabling: no matching certificate, or no `signtool.exe` on the
-machine, and signing is skipped with a note while the build proceeds unsigned;
-a signing failure (e.g. an unreachable timestamp server) warns but never fails
-the build. `signtool.exe` is located via a `SIGNTOOL` environment variable, the
-newest Windows 10/11 SDK, or `PATH`, in that order.
+*before* Setup is built so the installer packs the signed binary, and signs
+`WgSharp-Setup.exe` itself only after `makensis` finishes (signing before
+would invalidate itself, since the compiler still has to write the final
+bytes). This is entirely self-disabling: no matching certificate, or no
+`signtool.exe` on the machine, and signing is skipped with a note while the
+build proceeds unsigned; a signing failure (e.g. an unreachable timestamp
+server) warns but never fails the build. `signtool.exe` is located via a
+`SIGNTOOL` environment variable, the newest Windows 10/11 SDK, or `PATH`, in
+that order.
 
-**Two interactive prompts** near the end (both skippable via an environment
+**One interactive prompt** near the end (skippable via an environment
 variable, so unattended/CI builds never block):
 
-- *Keep the `.wixpdb`?* — `light.exe` writes a `WgSharp-Setup.wixpdb` symbol
-  file next to the MSI. It's only useful for authoring binary MSP patches
-  between MSI versions (which this project doesn't do — it ships full upgrade
-  MSIs), so the default is **No** (suppressed with `-spdb`). Set `WIXPDB=1` to
-  keep it or `WIXPDB=0` to suppress it without being asked.
 - *Build the portable zip?* — packages the **same** `WgSharp.exe` (the mode is
   decided by run location, not filename, so there's no separate "portable exe")
   together with `README.md` and `LICENSE` into
@@ -185,70 +180,57 @@ variable, so unattended/CI builds never block):
 
 **Installing or upgrading automatically closes a running WgSharp** — both the
 GUI and the background service, which are the same exe — before touching
-files:
+files. A plain `taskkill`/`WM_CLOSE` doesn't actually work here: WgSharp's
+window only minimizes to tray on an ordinary close (see **System tray** in
+[Features](#features) above), so an external close request needs to look
+like something else. `installer\CloseWgSharp.ps1` (bundled into both the installer
+and uninstaller) handles this in two steps:
 
-- The **background service** (`WgSharpSvc`) is stopped via a `<ServiceControl
-  Stop="both" Wait="yes">` element — a core Windows Installer feature where
-  the engine itself calls the Service Control Manager and synchronously waits
-  for the service to actually exit before files are written. Its own shutdown
-  path stops any active tunnel cleanly (kill-switch rules and routes removed)
-  as part of that.
-- The **GUI/tray process** is closed via `util:CloseApplication`, with
-  `EndSessionMessage="yes"` rather than a plain `CloseMessage` alone: a bare
-  `WM_CLOSE` arriving from another process is indistinguishable, at the
-  WinForms level, from the user clicking the title-bar X, so it would get
-  swallowed by the intentional "X minimizes to tray" behavior. `WM_QUERYENDSESSION`
-  (what `EndSessionMessage` sends) maps to a different, unambiguous close
-  reason that `MainForm` already treats as a real exit. As a hard guarantee on
-  top of that, `TerminateProcess="1"` force-closes the process if it's still
-  running after a few seconds — so the file is unlocked no matter what.
+- The **background service** (`WgSharpSvc`) is stopped via `Stop-Service`
+  and waited on, releasing its lock on the exe and tearing down any active
+  tunnel cleanly (kill-switch rules and routes removed) as part of its own
+  shutdown path.
+- The **GUI/tray process** is sent `WM_QUERYENDSESSION` + `WM_ENDSESSION`
+  (not a plain `WM_CLOSE`, which — arriving from another process — is
+  indistinguishable at the WinForms level from clicking the title-bar X, and
+  would just get swallowed by the "minimize to tray" behavior).
+  `WM_QUERYENDSESSION`/`WM_ENDSESSION` map to a different, unambiguous close
+  reason that `MainForm` already treats as a real exit. As a hard guarantee
+  on top of that, any process still running after 15 seconds is force-killed
+  — so the exe is unlocked no matter what.
 
-Note that `util:CloseApplication` has no UI of its own — these mechanisms work
-silently in the background, without showing a prompt. Windows Installer's
-*own* Restart Manager, however, does its file-lock detection early and, left
-enabled, could pop the native **"Setup was unable to close all running
-processes"** dialog before our own (more capable) shutdown even ran — racing
-the service's several-second tunnel-teardown and losing. `Product.wxs`
-therefore sets `MSIRESTARTMANAGERCONTROL=Disable`, handing shutdown entirely
-to the two explicit mechanisms above: `ServiceControl` (`Wait="yes"`, so the
-engine waits for the service teardown) and `util:CloseApplication`
-(`Timeout="15"`, then a `TerminateProcess` fallback). The service's own
-`OnStop` also calls `RequestAdditionalTime` and bounds its teardown on a
-worker thread, so a slow adapter/route cleanup is never mistaken for a hung
-service and can't stall the installer.
+Since `WgSharpSvc` runs the exact same `WgSharp.exe` (headless, as `LocalSystem`,
+in Session 0), the script tells the two apart by session ID rather than by
+image name.
 
-Together these guarantee `WgSharp.exe` is genuinely unlocked by the time
-Setup writes the new one, with nothing depending on whether — or how — the
-user interacts with any prompt.
+**Setup also migrates a previous MSI-based install automatically**, if it
+finds one: it looks for an Add/Remove Programs entry named "WgSharp" keyed by
+a ProductCode GUID (the old MSI minted a new one on every build, so there's
+no single ID to look for) and silently runs `msiexec /x` on it before laying
+down its own files — no separate uninstall step needed when moving from an
+old MSI-based install to this installer.
 
-It uses `1.YY.MMDD` — the leading 3 fields of the exe's own `1.YY.MMDD.0`
-(see [Versioning](#versioning) above) — both stamped from one computation in
-`build.cmd`, so there's only ever one date encoding to think about, even
-though Windows Installer's stricter 3-field format keeps the two strings
-from being byte-for-byte identical.
+None of this ever touches `ProgramData\WgSharp\conf` or the
+`HKEY_LOCAL_MACHINE\Software\WgSharp` settings key (neither the old MSI's own
+component set, nor this installer, nor its migration step manage either) —
+install, update, uninstall, and migrating off the old MSI all leave your
+saved tunnels and settings completely untouched.
 
-> [!NOTE]
-> Since the version only has day granularity, rebuilding and reinstalling
-> more than once on the same day produces a new MSI with a different
-> ProductCode but an *identical* ProductVersion to the one already
-> installed. Windows Installer doesn't treat that as an upgrade by default —
-> it treats same-version + different-ProductCode as two unrelated products,
-> which silently leaves the old `WgSharp.exe` untouched no matter how
-> cleanly the running processes were closed first. `Product.wxs` sets
-> `AllowSameVersionUpgrades="yes"` specifically to fix this (with WiX's
-> ICE61 validation suppressed in `build.cmd`, since it's correctly flagging
-> exactly the thing being asked for on purpose).
+It uses `1.YY.MMDD` for its own Add/Remove Programs `DisplayVersion` and
+`1.YY.MMDD.0` for its Win32 version resource — the same one date computation
+in `build.cmd` used everywhere else (see [Versioning](#versioning) above), so
+there's only ever one encoding to think about.
 
-**Installing via the MSI changes WgSharp's defaults**, on the principle that
-a proper install implies "set this up the way I'd actually want it running" —
+**Installing via Setup changes WgSharp's defaults**, on the principle that a
+proper install implies "set this up the way I'd actually want it running" —
 see `src\core\InstallLocation.cs`, which detects whether the running exe lives
 at that exact fixed path:
 
-- The **background service** is registered *and started by the MSI itself*
+- The **background service** is registered (but not started) by Setup itself
   at install time (it's already elevated), so the unelevated GUI never has to
-  prompt just to set it up — an MSI install shows no UAC prompt on launch at
-  all. **Start GUI at login** is also enabled as the intended starting point.
-  You can turn either back off afterward.
+  prompt just to set it up — an installed copy shows no UAC prompt on launch
+  at all. **Start GUI at login** is also enabled as the intended starting
+  point. You can turn either back off afterward.
 - **Portable mode is unavailable**, persistently, not just at first run — its
   checkbox in Settings is disabled outright. Portable mode is for the
   standalone/zip distribution that travels with its own folder; it doesn't
@@ -257,20 +239,19 @@ at that exact fixed path:
 
 None of this applies to a copy run from anywhere else (the zip distribution,
 a USB stick, a dev build) — those keep today's defaults (everything off,
-portable mode available) exactly as before. The installer registers and
-starts the background service (via WiX `ServiceInstall` / `ServiceControl`),
-but does **not** touch the Windows Firewall or enable login autostart at the
-MSI level — firewall pre-authorization is the service's / app's own job, and
-autostart is set by the app on first run.
+portable mode available) exactly as before. Setup registers the background
+service, but does **not** touch the Windows Firewall or enable login
+autostart itself — firewall pre-authorization is the service's / app's own
+job, and autostart is set by the app on first run.
 
-**Uninstalling removes everything**, including the two files the MSI never
+**Uninstalling removes everything**, including the two files Setup never
 technically installed in the first place: `wintun.dll` and `wireguard.dll`
 are downloaded by WgSharp itself at runtime (see
 [Run](#run) below) straight into its own folder, so a plain uninstall
 wouldn't know to remove them or be able to delete the now-non-empty install
-folder. `Product.wxs` explicitly cleans both up on uninstall for exactly
-that reason, alongside the background service registration and the
-install directory itself.
+folder. The uninstaller explicitly cleans both up for exactly that reason,
+alongside the service registration, Start Menu shortcuts, the Add/Remove
+Programs entry, and the install directory itself.
 
 ## Run
 
@@ -280,8 +261,8 @@ privileged work (creating the adapter, routes, DNS, firewall) happens in the
 `WgSharpSvc` background service, which runs as `LocalSystem`. The first time
 you need it, WgSharp performs a **one-time** administrator setup: a single UAC
 prompt that registers and starts that service and pre-authorizes the firewall.
-(With the MSI installer this already happened at install time, so there's no
-prompt at all — see [MSI installer](#msi-installer-optional).) Every launch
+(With the Setup installer this already happened at install time, so there's no
+prompt at all — see [Setup installer](#setup-installer-optional).) Every launch
 after that is prompt-free, and controlling tunnels needs no
 elevation — the service authorizes control commands by checking that your
 Windows account is a member of the Administrators group, including via the UAC
@@ -323,10 +304,10 @@ on anything but native x64 rather than fail confusingly inside adapter
 creation.
 
 **Auto-reconnect after upgrade or restart:** if you were connected to a tunnel
-when WgSharp last exited (or when an MSI upgrade restarted it), WgSharp
+when WgSharp last exited (or when a Setup upgrade restarted it), WgSharp
 reconnects to that tunnel automatically on next launch. The last-tunnel record
-is stored in `HKEY_LOCAL_MACHINE\Software\WgSharp` (registry), which the MSI
-installer never touches. On first launch after an upgrade, WgSharp sees the
+is stored in `HKEY_LOCAL_MACHINE\Software\WgSharp` (registry), which Setup
+never touches. On first launch after an upgrade, WgSharp sees the
 record, finds the tunnel still in the config store, and activates it — the
 same experience as if you'd clicked Connect yourself. Only applies to
 non-portable tunnels (the service can't decrypt portable configs unattended).
@@ -541,8 +522,8 @@ tunnels always run in the (elevated) GUI itself, never through the service.
 
 - **Portable mode** — store tunnel configs in a `conf` folder next to the exe,
   password-encrypted, instead of the DPAPI-protected `C:\ProgramData` store.
-  Unavailable when running from the MSI's fixed install location — see
-  [MSI installer](#msi-installer-optional).
+  Unavailable when running from Setup's fixed install location — see
+  [Setup installer](#setup-installer-optional).
 - **Use WireGuardNT (kernel) backend** — see [above](#two-tunnel-backends).
 - **Start with Windows (background service)** — see
   [above](#background-service-reconnect-before-login). Disabled when
@@ -560,12 +541,6 @@ tunnels always run in the (elevated) GUI itself, never through the service.
   written** at all — the GUI instead pulls the service's recent activity from
   a small in-memory buffer over the control pipe, so there's no constant disk
   I/O or ever-growing file.
-- **Show experimental features** — unhides features that work but aren't
-  reliable on all hardware. Currently this only affects **Scan from QR code**
-  in the Add Tunnel menu, which depends on the legacy VFW webcam API and may
-  not function with every camera driver. **Show QR** on a selected tunnel
-  (the QR icon in the toolbar) is always available regardless of this setting
-  — it's just rendering an image from text, no hardware involved.
 - **Check for updates** — when on (the default), WgSharp quietly asks GitHub at
   startup whether a newer release exists and, if so, shows a tray notification;
   clicking it opens the [releases page](https://github.com/inteliboy/WgSharp/releases)
@@ -609,10 +584,9 @@ first launch — values are copied to the registry and the old file is removed.
   code — either live via the webcam, or from a saved image. See
   [Scanning a QR code](#scanning-a-qr-code) for how it works and its limits.
 
-## Scanning a QR code *(experimental)*
+## Scanning a QR code
 
-**Add Tunnel → Scan from QR code** is available when **Settings → Show
-experimental features** is on. It opens a small live preview and decodes
+**Add Tunnel → Scan from QR code** opens a small live preview and decodes
 whatever QR code the webcam sees — the same kind of code a tunnel's own
 **Show QR** produces, or one exported from the official WireGuard mobile app.
 A **Scan from image file…** button is always available alongside it, for a
@@ -630,15 +604,12 @@ library, matching the rest of the project:
   camera — in-plane rotation is fine, but there's no full perspective
   (keystone) correction, so try to hold the code roughly parallel to the
   webcam rather than at a steep angle.
-- **Webcam access** uses the legacy Video for Windows capture API
-  (`avicap32.dll`), which ships with Windows and needs no install — but isn't
-  guaranteed to work with every camera. Most UVC webcams still expose the
-  compatibility shim it needs; some newer or IR/Windows-Hello-only cameras
-  don't. If no usable driver is found, the dialog says so and goes straight to
-  the image-file option. The live preview is drawn by WgSharp itself from the
-  camera's frame callback (not VFW's own preview rendering, which is
-  unreliable across drivers), so what you see is exactly the frames being
-  decoded.
+- **Webcam access** uses a DirectShow capture graph built directly against the
+  Windows APIs, no external library or driver install needed — but isn't
+  guaranteed to work with every camera or driver. If no usable device is
+  found, the dialog says so and goes straight to the image-file option. The
+  live preview is drawn by WgSharp itself from the camera's frame callback,
+  so what you see is exactly the frames being decoded.
 - **Camera connects but you see nothing (black box, or no image at all)?**
   That's almost always Windows' camera privacy setting blocking desktop apps,
   not a WgSharp bug — on Windows 10/11, Settings → Privacy & security →
@@ -676,7 +647,7 @@ greyed out in portable mode, since a password-encrypted portable tunnel has no
 one present at boot/login to unlock it. See [Run](#run).
 
 Portable mode is **determined by where WgSharp runs from**, not a free choice:
-a copy in `Program Files` (an MSI install) is always non-portable, and a copy
+a copy in `Program Files` (a Setup install) is always non-portable, and a copy
 anywhere else is always portable. The Settings checkbox reflects this as a
 fixed, greyed indicator — checked for a standalone copy, unchecked for an
 install — so it can't drift from what the app actually does.
@@ -790,7 +761,7 @@ self-registered Windows Firewall rules, drag-and-drop import/export/reorder,
 double-click-to-connect, per-tunnel password caching, a syntax-highlighting
 config editor with live-derived public key and QR export, split-tunnel DNS
 auto-routing, AmneziaWG obfuscation on the managed backend, background
-service with pre-login reconnect, auto-reconnect after MSI upgrade or
+service with pre-login reconnect, auto-reconnect after a Setup upgrade or
 restart, explicit key material zeroing after disconnect, and a Stats tab
 with live charts.
 

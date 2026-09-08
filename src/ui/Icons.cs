@@ -46,14 +46,15 @@ namespace WgSharp.Ui
             return bmp;
         }
 
-        public static Bitmap Export(int size)
+        // col is theme-dependent (AppTheme.FieldValue) - the old fixed dark
+        // gray fill was near-invisible on a dark button surface.
+        public static Bitmap Export(int size, Color col)
         {
             // a downward arrow into a tray (export to file)
             var bmp = NewBitmap(size);
             using (var g = Graphics.FromImage(bmp))
             {
                 Prep(g);
-                var col = Color.FromArgb(0x55, 0x55, 0x55);
                 using (var pen = new Pen(col, System.Math.Max(1.6f, size / 10f)))
                 {
                     pen.StartCap = LineCap.Round; pen.EndCap = LineCap.Round;
@@ -71,14 +72,17 @@ namespace WgSharp.Ui
             return bmp;
         }
 
-        public static Bitmap QrGlyph(int size)
+        // col is theme-dependent (AppTheme.FieldValue) - the old fixed dark
+        // gray fill was near-invisible on a dark button surface. The white
+        // "holes" punched by DrawFinder stay white intentionally (mimics a
+        // real QR code's quiet zones) regardless of theme.
+        public static Bitmap QrGlyph(int size, Color col)
         {
             // a tiny stylized QR corner motif
             var bmp = NewBitmap(size);
             using (var g = Graphics.FromImage(bmp))
             {
                 Prep(g);
-                var col = Color.FromArgb(0x44, 0x44, 0x44);
                 using (var b = new SolidBrush(col))
                 {
                     float u = size * 0.16f;

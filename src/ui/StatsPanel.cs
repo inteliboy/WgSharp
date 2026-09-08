@@ -15,6 +15,9 @@ namespace WgSharp.Ui
         private readonly AreaChart _downChart;
         private readonly AreaChart _upChart;
         private readonly Label _lblDown, _lblUp, _lblTotal, _lblDuration, _lblLatency;
+        private readonly System.Collections.Generic.List<Label> _captionLabels =
+            new System.Collections.Generic.List<Label>();
+        private ThemedGroupBox _summaryGroup;
 
         private long _prevRx = -1, _prevTx = -1;
         private DateTime _prevTime = DateTime.MinValue;
@@ -39,11 +42,10 @@ namespace WgSharp.Ui
             _upChart.Size = new Size(440, 130);
             _upChart.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
-            var stats = new GroupBox();
-            stats.Text = "Summary";
-            stats.ForeColor = AppTheme.GroupText;
-            stats.Location = new Point(8, 290);
-            stats.Size = new Size(420, 132);
+            _summaryGroup = new ThemedGroupBox();
+            _summaryGroup.Text = "Summary";
+            _summaryGroup.Location = new Point(8, 290);
+            _summaryGroup.Size = new Size(420, 132);
 
             var grid = new TableLayoutPanel();
             grid.Dock = DockStyle.Fill;
@@ -57,11 +59,11 @@ namespace WgSharp.Ui
             _lblTotal = AddStat(grid, "Total transferred");
             _lblDuration = AddStat(grid, "Session duration");
             _lblLatency = AddStat(grid, "Tunnel latency");
-            stats.Controls.Add(grid);
+            _summaryGroup.Controls.Add(grid);
 
             Controls.Add(_downChart);
             Controls.Add(_upChart);
-            Controls.Add(stats);
+            Controls.Add(_summaryGroup);
 
             // Keep equal left/right gaps from the panel edge for the charts.
             LayoutCharts();
@@ -113,7 +115,22 @@ namespace WgSharp.Ui
 
             t.Controls.Add(lbl, 0, row);
             t.Controls.Add(val, 1, row);
+            _captionLabels.Add(lbl);
             return val;
+        }
+
+        // Called from MainForm.ApplyTheme() on every toggle - the charts and
+        // ThemedGroupBox border/caption read AppTheme.* live in their own
+        // OnPaint and just need Invalidate(true) (already done by the Form-
+        // level ApplyTheme call), but BackColor/ForeColor properties set once
+        // at construction time need to be re-assigned explicitly.
+        public void RefreshTheme()
+        {
+            BackColor = AppTheme.PanelBg;
+            foreach (Label l in _captionLabels) l.ForeColor = AppTheme.FieldLabel;
+            _lblDown.ForeColor = _lblUp.ForeColor = _lblTotal.ForeColor =
+                _lblDuration.ForeColor = _lblLatency.ForeColor = AppTheme.FieldValue;
+            Invalidate(true);
         }
 
         private void SetActiveVisuals(bool active)

@@ -153,15 +153,27 @@ namespace WgSharp
 
             try
             {
+                // Theme detection/override must happen before EnableVisualStyles()
+                // so uxtheme picks up the preferred app mode from the start (same
+                // ordering LenovoRepoBuilder's Program.cs uses). AppTheme.IsDark's
+                // static initializer already reads the real OS setting; only an
+                // explicit user override (persisted separately from other
+                // settings, since it's a UI preference) needs to win over that.
+                WgSharp.Core.AppSettings.Load();
+                if (WgSharp.Core.AppSettings.ThemeOverrideSet)
+                    WgSharp.Ui.AppTheme.IsDark = WgSharp.Core.AppSettings.ThemeIsDark;
+                WgSharp.Ui.NativeMethods.SetPreferredAppMode(WgSharp.Ui.AppTheme.IsDark);
+                WgSharp.Ui.NativeMethods.FlushMenuThemes();
+
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                WgSharp.Core.AppSettings.Load();
                 // Must run AFTER Load() (it checks whether a settings file
                 // existed to recognize a genuine first run) and BEFORE
                 // MainForm is constructed (so the GUI-at-login choice it just
                 // made is already in effect for this very launch).
                 WgSharp.Core.InstallLocation.ApplyFirstRunDefaultsIfApplicable();
-                // Silently re-registers the service if an MSI upgrade removed it.
+                // Silently re-registers the service if it's missing (see
+                // RestoreServiceIfUpgradeWipedIt's own doc comment).
                 WgSharp.Core.InstallLocation.RestoreServiceIfUpgradeWipedIt();
                 // Unlike the above, this one applies on every launch, not
                 // just the first — see its doc comment.

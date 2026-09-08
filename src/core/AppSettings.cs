@@ -31,11 +31,15 @@ namespace WgSharp.Core
         public static bool PortableMode;
         public static bool UseWireGuardNt = true;
         public static bool DebugLog;
-        public static bool ExperimentalFeatures;
         public static bool CheckForUpdates = true;   // check GitHub for a newer release at startup
         public static bool StartGuiAtLogin;
         public static bool ServiceWasInstalled;
         public static string TunnelOrder = "";
+        // Dark/light theme override. ThemeOverrideSet is false until the user
+        // explicitly toggles the "Dark theme" setting; while false, the app
+        // follows the real OS theme instead of ThemeIsDark.
+        public static bool ThemeIsDark;
+        public static bool ThemeOverrideSet;
 
         private const string RegKey = @"Software\WgSharp";
 
@@ -127,11 +131,12 @@ namespace WgSharp.Core
                     if (k == null) return;
                     UseWireGuardNt      = ReadBool(k, "UseWireGuardNt", true);
                     DebugLog            = ReadBool(k, "DebugLog", false);
-                    ExperimentalFeatures= ReadBool(k, "ExperimentalFeatures", false);
                     CheckForUpdates     = ReadBool(k, "CheckForUpdates", true);
                     StartGuiAtLogin     = ReadBool(k, "StartGuiAtLogin", false);
                     ServiceWasInstalled = ReadBool(k, "ServiceWasInstalled", false);
                     TunnelOrder         = ReadString(k, "TunnelOrder", "");
+                    ThemeIsDark         = ReadBool(k, "ThemeIsDark", false);
+                    ThemeOverrideSet    = ReadBool(k, "ThemeOverrideSet", false);
                 }
             }
             catch { }
@@ -159,7 +164,7 @@ namespace WgSharp.Core
                 if (found == null) return;
 
                 // Parse the file temporarily into local vars, then write registry.
-                bool wgNt = true, debug = false, exp = false, gui = false, svc = false, upd = true;
+                bool wgNt = true, debug = false, gui = false, svc = false, upd = true;
                 string order = "";
                 foreach (string raw in File.ReadAllLines(found))
                 {
@@ -171,7 +176,6 @@ namespace WgSharp.Core
                     string val = line.Substring(eq + 1).Trim();
                     if (key.Equals("UseWireGuardNt", StringComparison.OrdinalIgnoreCase))       wgNt  = ParseBool(val);
                     else if (key.Equals("DebugLog", StringComparison.OrdinalIgnoreCase))         debug = ParseBool(val);
-                    else if (key.Equals("ExperimentalFeatures", StringComparison.OrdinalIgnoreCase)) exp = ParseBool(val);
                     else if (key.Equals("CheckForUpdates", StringComparison.OrdinalIgnoreCase)) upd = ParseBool(val);
                     else if (key.Equals("StartGuiAtLogin", StringComparison.OrdinalIgnoreCase))  gui   = ParseBool(val);
                     else if (key.Equals("ServiceWasInstalled", StringComparison.OrdinalIgnoreCase)) svc = ParseBool(val);
@@ -186,7 +190,6 @@ namespace WgSharp.Core
                     if (k == null) return;
                     k.SetValue("UseWireGuardNt",       wgNt  ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("DebugLog",             debug ? 1 : 0, RegistryValueKind.DWord);
-                    k.SetValue("ExperimentalFeatures", exp   ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("CheckForUpdates",      upd   ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("StartGuiAtLogin",      gui   ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("ServiceWasInstalled",  svc   ? 1 : 0, RegistryValueKind.DWord);
@@ -229,8 +232,6 @@ namespace WgSharp.Core
                         UseWireGuardNt = ParseBool(val);
                     else if (key.Equals("DebugLog", StringComparison.OrdinalIgnoreCase))
                         DebugLog = ParseBool(val);
-                    else if (key.Equals("ExperimentalFeatures", StringComparison.OrdinalIgnoreCase))
-                        ExperimentalFeatures = ParseBool(val);
                     else if (key.Equals("CheckForUpdates", StringComparison.OrdinalIgnoreCase))
                         CheckForUpdates = ParseBool(val);
                     else if (key.Equals("StartGuiAtLogin", StringComparison.OrdinalIgnoreCase))
@@ -239,6 +240,10 @@ namespace WgSharp.Core
                         ServiceWasInstalled = ParseBool(val);
                     else if (key.Equals("TunnelOrder", StringComparison.OrdinalIgnoreCase))
                         TunnelOrder = val;
+                    else if (key.Equals("ThemeIsDark", StringComparison.OrdinalIgnoreCase))
+                        ThemeIsDark = ParseBool(val);
+                    else if (key.Equals("ThemeOverrideSet", StringComparison.OrdinalIgnoreCase))
+                        ThemeOverrideSet = ParseBool(val);
                 }
             }
             catch { }
@@ -265,11 +270,12 @@ namespace WgSharp.Core
                     if (k == null) return;
                     k.SetValue("UseWireGuardNt",       UseWireGuardNt       ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("DebugLog",             DebugLog             ? 1 : 0, RegistryValueKind.DWord);
-                    k.SetValue("ExperimentalFeatures", ExperimentalFeatures ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("CheckForUpdates",      CheckForUpdates      ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("StartGuiAtLogin",      StartGuiAtLogin      ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("ServiceWasInstalled",  ServiceWasInstalled  ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("TunnelOrder",          TunnelOrder ?? "",            RegistryValueKind.String);
+                    k.SetValue("ThemeIsDark",          ThemeIsDark          ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("ThemeOverrideSet",     ThemeOverrideSet     ? 1 : 0, RegistryValueKind.DWord);
                     // PortableMode is NOT stored in the registry — if it's false
                     // (the normal case) we use the registry; if it's true we use
                     // the file. Storing false here would be redundant, and we never
@@ -288,11 +294,12 @@ namespace WgSharp.Core
                 sb.AppendLine("PortableMode=" + (PortableMode ? "true" : "false"));
                 sb.AppendLine("UseWireGuardNt=" + (UseWireGuardNt ? "true" : "false"));
                 sb.AppendLine("DebugLog=" + (DebugLog ? "true" : "false"));
-                sb.AppendLine("ExperimentalFeatures=" + (ExperimentalFeatures ? "true" : "false"));
                 sb.AppendLine("CheckForUpdates=" + (CheckForUpdates ? "true" : "false"));
                 sb.AppendLine("StartGuiAtLogin=" + (StartGuiAtLogin ? "true" : "false"));
                 sb.AppendLine("ServiceWasInstalled=" + (ServiceWasInstalled ? "true" : "false"));
                 sb.AppendLine("TunnelOrder=" + (TunnelOrder ?? ""));
+                sb.AppendLine("ThemeIsDark=" + (ThemeIsDark ? "true" : "false"));
+                sb.AppendLine("ThemeOverrideSet=" + (ThemeOverrideSet ? "true" : "false"));
                 File.WriteAllText(FileSettingsPath, sb.ToString());
             }
             catch { }

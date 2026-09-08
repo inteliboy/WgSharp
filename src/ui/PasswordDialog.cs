@@ -25,36 +25,49 @@ namespace WgSharp.Ui
             ShowInTaskbar = false;
             Font = new Font("Segoe UI", 9F);
             ClientSize = new Size(380, confirm ? 168 : 130);
+            BackColor = AppTheme.WindowBg;
+            HandleCreated += delegate
+            {
+                NativeMethods.SetDarkTitleBar(Handle, AppTheme.IsDark);
+                NativeMethods.SetBorderAndCaptionColor(Handle,
+                    AppTheme.IsDark ? AppTheme.Border : Color.Empty,
+                    AppTheme.IsDark ? AppTheme.Surface : Color.Empty);
+            };
 
             var lbl = new Label
             {
                 Text = prompt,
                 Location = new Point(16, 14),
                 Size = new Size(348, 36),
-                AutoSize = false
+                AutoSize = false,
+                ForeColor = AppTheme.FieldValue
             };
 
-            var lblPw = new Label { Text = "Password:", Location = new Point(16, 56), Size = new Size(90, 22), TextAlign = ContentAlignment.MiddleLeft };
+            var lblPw = new Label { Text = "Password:", Location = new Point(16, 56), Size = new Size(90, 22), TextAlign = ContentAlignment.MiddleLeft, ForeColor = AppTheme.FieldLabel };
             _pw = new TextBox { Location = new Point(110, 54), Size = new Size(254, 24), UseSystemPasswordChar = true };
+            Ctrl.ThemeEntry(_pw);
 
             _confirm = new TextBox { Location = new Point(110, 84), Size = new Size(254, 24), UseSystemPasswordChar = true };
-            var lblConfirm = new Label { Text = "Confirm:", Location = new Point(16, 86), Size = new Size(90, 22), TextAlign = ContentAlignment.MiddleLeft };
+            Ctrl.ThemeEntry(_confirm);
+            var lblConfirm = new Label { Text = "Confirm:", Location = new Point(16, 86), Size = new Size(90, 22), TextAlign = ContentAlignment.MiddleLeft, ForeColor = AppTheme.FieldLabel };
 
             int btnY = confirm ? 124 : 90;
             var ok = new Button { Text = "OK", DialogResult = DialogResult.None, Size = new Size(84, 28), Location = new Point(196, btnY) };
+            Ctrl.FlattenButton(ok, true);
             var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Size = new Size(84, 28), Location = new Point(284, btnY) };
+            Ctrl.FlattenButton(cancel, false);
 
             ok.Click += delegate
             {
                 if (_pw.Text.Length == 0)
                 {
-                    MessageBox.Show(this, "Please enter a password.", "WgSharp",
+                    ThemedMessageBox.Show(this, "Please enter a password.", "WgSharp",
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }
                 if (confirm && _pw.Text != _confirm.Text)
                 {
-                    MessageBox.Show(this, "The passwords do not match.", "WgSharp",
+                    ThemedMessageBox.Show(this, "The passwords do not match.", "WgSharp",
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     return;
                 }

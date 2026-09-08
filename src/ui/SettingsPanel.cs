@@ -14,19 +14,19 @@ namespace WgSharp.Ui
     public sealed class SettingsPanel : Panel
     {
         private readonly CheckBox _portable;
-        private readonly Label _portableHelp;
         private readonly CheckBox _wgNt;
         private readonly CheckBox _autoStart;
-        private readonly Label _autoStartHelp;
         private readonly CheckBox _guiAutoStart;
-        private readonly Label _guiAutoStartHelp;
         private readonly CheckBox _debugLog;
-        private readonly CheckBox _experimental;
         private readonly CheckBox _checkUpdates;
+        private readonly CheckBox _darkTheme;
+        // Descriptions now appear as hover tooltips (2-second delay) instead of
+        // always-visible labels, leaving more room for the options themselves.
+        private readonly ToolTip _tips;
         private bool _loading;
 
         public event Action PortableModeChanged;
-        public event Action ExperimentalFeaturesChanged;
+        public event Action ThemeToggled;
 
         public SettingsPanel()
         {
@@ -35,179 +35,127 @@ namespace WgSharp.Ui
             Padding = new Padding(10);
             AutoScroll = true;   // never clip the last item when the window is short
 
-            _portable = new CheckBox
+            // Order: portable, WireGuardNT, background service, GUI at login,
+            // check for updates, debug log, dark theme.
+            _tips = new ToolTip
             {
-                Text = "Portable mode",
-                Location = new Point(16, 10),
-                Size = new Size(300, 22),
-                ForeColor = AppTheme.FieldValue,
-                Font = new Font("Segoe UI", 9.5F, FontStyle.Bold)
+                AutoPopDelay = 20000,  // keep the tip visible long enough to read
+                InitialDelay = 500,    // ~0.5s of hover before showing
+                ReshowDelay = 300,
+                ShowAlways = true
             };
-            _portableHelp = new Label
-            {
-                Text = "Stores tunnel configs in a \"conf\" folder next to the app, password-" +
-                       "encrypted instead of using Windows DPAPI, so they can travel with the " +
-                       "app folder to another machine.",
-                Location = new Point(36, 30),
-                Size = new Size(450, 36),
-                ForeColor = AppTheme.FieldLabel
-            };
+
+            _portable = MakeOption("Portable mode",
+                "Stores tunnel configs in a \"conf\" folder next to the app, password-encrypted " +
+                "instead of using Windows DPAPI, so they can travel with the app folder to another " +
+                "machine.");
             _portable.CheckedChanged += OnPortableChanged;
 
-            _wgNt = new CheckBox
-            {
-                Text = "Use WireGuardNT (kernel) backend",
-                Location = new Point(16, 70),
-                Size = new Size(340, 22),
-                ForeColor = AppTheme.FieldValue,
-                Font = new Font("Segoe UI", 9.5F, FontStyle.Bold)
-            };
-            var wgNtHelp = new Label
-            {
-                Text = "Uses the official kernel WireGuard driver for higher throughput, " +
-                       "instead of the built-in managed implementation. Recommended; on by " +
-                       "default. Takes effect on the next connect.",
-                Location = new Point(36, 92),
-                Size = new Size(450, 36),
-                ForeColor = AppTheme.FieldLabel
-            };
+            _wgNt = MakeOption("Use WireGuardNT (kernel) backend",
+                "Uses the official kernel WireGuard driver for higher throughput, instead of the " +
+                "built-in managed implementation. Recommended; on by default. Takes effect on the " +
+                "next connect.");
             _wgNt.CheckedChanged += OnWgNtChanged;
 
-            _autoStart = new CheckBox
-            {
-                Text = "Start with Windows (background service)",
-                Location = new Point(16, 132),
-                Size = new Size(380, 22),
-                ForeColor = AppTheme.FieldValue,
-                Font = new Font("Segoe UI", 9.5F, FontStyle.Bold)
-            };
-            _autoStartHelp = new Label
-            {
-                Text = "Installs a background service that reconnects your last tunnel " +
-                       "automatically, even before you log in. Only works with the normal " +
-                       "(non-portable) store, since the service has no one around to type a " +
-                       "password for a portable tunnel.",
-                Location = new Point(36, 154),
-                Size = new Size(450, 44),
-                ForeColor = AppTheme.FieldLabel
-            };
+            _autoStart = MakeOption("Start with Windows (background service)",
+                "Installs a background service that reconnects your last tunnel automatically, even " +
+                "before you log in. Only works with the normal (non-portable) store, since the " +
+                "service has no one around to type a password for a portable tunnel.");
             _autoStart.CheckedChanged += OnAutoStartChanged;
 
-            _guiAutoStart = new CheckBox
-            {
-                Text = "Start GUI at login (in the tray)",
-                Location = new Point(16, 202),
-                Size = new Size(380, 22),
-                ForeColor = AppTheme.FieldValue,
-                Font = new Font("Segoe UI", 9.5F, FontStyle.Bold)
-            };
-            _guiAutoStartHelp = new Label
-            {
-                Text = "Launches the WgSharp window minimized to the notification area when " +
-                       "you log in, like the official client. Independent of the background " +
-                       "service above: that reconnects your tunnel before login; this just " +
-                       "puts the tray icon there for you.",
-                Location = new Point(36, 224),
-                Size = new Size(450, 44),
-                ForeColor = AppTheme.FieldLabel
-            };
+            _guiAutoStart = MakeOption("Start GUI at login (in the tray)",
+                "Launches the WgSharp window minimized to the notification area when you log in, like " +
+                "the official client. Independent of the background service above: that reconnects " +
+                "your tunnel before login; this just puts the tray icon there for you.");
             _guiAutoStart.CheckedChanged += OnGuiAutoStartChanged;
 
-            _debugLog = new CheckBox
-            {
-                Text = "Debug log",
-                Location = new Point(16, 272),
-                Size = new Size(300, 22),
-                ForeColor = AppTheme.FieldValue,
-                Font = new Font("Segoe UI", 9.5F, FontStyle.Bold)
-            };
-            var debugLogHelp = new Label
-            {
-                Text = "When on, the Log tab shows full diagnostic detail and the background " +
-                       "service writes a service.log file. When off (default) only the most " +
-                       "meaningful messages are shown and no service.log is written, to avoid " +
-                       "constant disk writes.",
-                Location = new Point(36, 294),
-                Size = new Size(450, 40),
-                ForeColor = AppTheme.FieldLabel
-            };
-            _debugLog.CheckedChanged += OnDebugLogChanged;
-
-            _experimental = new CheckBox
-            {
-                Text = "Show experimental features",
-                Location = new Point(16, 338),
-                Size = new Size(450, 22),
-                ForeColor = AppTheme.FieldValue,
-                Font = new Font("Segoe UI", 9.5F, FontStyle.Bold)
-            };
-            var experimentalHelp = new Label
-            {
-                Text = "Enables features that are functional but not yet fully reliable on all hardware, " +
-                       "such as scanning a QR code from the webcam.",
-                Location = new Point(36, 360),
-                Size = new Size(450, 30),
-                ForeColor = AppTheme.FieldLabel
-            };
-            _experimental.CheckedChanged += OnExperimentalChanged;
-
-            _checkUpdates = new CheckBox
-            {
-                Text = "Check for updates",
-                Location = new Point(16, 404),
-                Size = new Size(450, 22),
-                ForeColor = AppTheme.FieldValue,
-                Font = new Font("Segoe UI", 9.5F, FontStyle.Bold)
-            };
-            var checkUpdatesHelp = new Label
-            {
-                Text = "When on (default), WgSharp quietly checks GitHub at startup for a newer " +
-                       "release and shows a tray notification if one exists. It never downloads or " +
-                       "installs anything on its own \u2014 clicking the notification just opens the " +
-                       "releases page in your browser.",
-                Location = new Point(36, 426),
-                Size = new Size(450, 46),
-                ForeColor = AppTheme.FieldLabel
-            };
+            _checkUpdates = MakeOption("Check for updates",
+                "When on (default), WgSharp quietly checks GitHub at startup for a newer release and " +
+                "shows a tray notification if one exists. It never downloads or installs anything on " +
+                "its own \u2014 clicking the notification just opens the releases page in your browser.");
             _checkUpdates.CheckedChanged += OnCheckUpdatesChanged;
 
-            Controls.Add(_portable);
-            Controls.Add(_portableHelp);
-            Controls.Add(_wgNt);
-            Controls.Add(wgNtHelp);
-            Controls.Add(_autoStart);
-            Controls.Add(_autoStartHelp);
-            Controls.Add(_guiAutoStart);
-            Controls.Add(_guiAutoStartHelp);
-            Controls.Add(_debugLog);
-            Controls.Add(debugLogHelp);
-            Controls.Add(_experimental);
-            Controls.Add(experimentalHelp);
-            Controls.Add(_checkUpdates);
-            Controls.Add(checkUpdatesHelp);
+            _debugLog = MakeOption("Debug log",
+                "When on, the Log tab shows full diagnostic detail and the background service writes a " +
+                "service.log file. When off (default) only the most meaningful messages are shown and " +
+                "no service.log is written, to avoid constant disk writes.");
+            _debugLog.CheckedChanged += OnDebugLogChanged;
 
-            // Make every description label span to the right edge and word-wrap
-            // instead of being clipped at a fixed 450px width. The help labels
-            // are the ones indented under their checkbox (x == 36); anchoring
-            // them Left|Right lets them grow/shrink with the window, and with
-            // AutoSize off a Label wraps its text to the available width. We
-            // deliberately DON'T force a taller height here: each label keeps
-            // the height it was created with (already sized for its text at a
-            // normal window width), so widening never makes a label overlap the
-            // next checkbox below it. On a narrow window the wider labels wrap
-            // to more lines; AutoScroll (set above) ensures nothing is cut off
-            // vertically. Done in one pass so it stays correct as options are
-            // added, rather than hand-tuning each label's Size.
-            foreach (Control c in Controls)
+            _darkTheme = MakeOption("Dark theme",
+                "Switches the app between light and dark. Off by default follows Windows' own light/" +
+                "dark setting until you toggle this explicitly, after which your choice is remembered.");
+            _darkTheme.CheckedChanged += OnDarkThemeChanged;
+
+            // Lay the options out top to bottom in the order created above. A
+            // single tight row height (no help label between them) is what
+            // frees up the space; the description is a hover tooltip instead.
+            const int leftPad = 16, top = 14, rowH = 34;
+            CheckBox[] options = { _portable, _wgNt, _autoStart, _guiAutoStart, _checkUpdates, _debugLog, _darkTheme };
+            for (int i = 0; i < options.Length; i++)
             {
-                Label lbl = c as Label;
-                if (lbl == null || lbl.Location.X != 36) continue;
-                lbl.AutoSize = false;
-                lbl.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-                const int rightPad = 16;
-                int w = ClientSize.Width - lbl.Location.X - rightPad;
-                if (w > lbl.Width) lbl.Width = w; // only ever widen from the design width
+                options[i].Location = new Point(leftPad, top + i * rowH);
+                options[i].Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+                Controls.Add(options[i]);
             }
+        }
+
+        // Builds a settings checkbox with a hover tooltip carrying its
+        // description. Width is generous and anchored so the label text isn't
+        // clipped; the tooltip (not an inline label) holds the explanation.
+        private CheckBox MakeOption(string text, string tip)
+        {
+            var cb = new ThemedCheckBox
+            {
+                Text = text,
+                Size = new Size(460, 24),
+                ForeColor = AppTheme.FieldValue,
+                Font = new Font("Segoe UI", 9.5F, FontStyle.Bold),
+                AutoSize = false
+            };
+            _tips.SetToolTip(cb, WrapTip(tip));
+            return cb;
+        }
+
+        // WinForms ToolTip doesn't word-wrap on its own — without explicit
+        // newlines it draws one long line that can span the whole screen. This
+        // inserts breaks at word boundaries near a target column so the tip
+        // stays a readable block.
+        private static string WrapTip(string text)
+        {
+            const int maxChars = 60; // roughly the comfortable width of the tip box
+            if (string.IsNullOrEmpty(text)) return text;
+            var sb = new System.Text.StringBuilder(text.Length + 16);
+            int lineLen = 0;
+            foreach (string word in text.Split(' '))
+            {
+                if (lineLen > 0 && lineLen + 1 + word.Length > maxChars)
+                {
+                    sb.Append('\n');
+                    lineLen = 0;
+                }
+                else if (lineLen > 0)
+                {
+                    sb.Append(' ');
+                    lineLen++;
+                }
+                sb.Append(word);
+                lineLen += word.Length;
+            }
+            return sb.ToString();
+        }
+
+        // Called from MainForm.ApplyTheme() on every toggle - the checkboxes
+        // are ThemedCheckBox and read AppTheme.* live in their own OnPaint
+        // (Invalidate(true), already done at the Form level, is all they
+        // need), but this panel's own BackColor was snapshotted once at
+        // construction and needs re-assigning explicitly.
+        public void RefreshTheme()
+        {
+            BackColor = AppTheme.PanelBg;
+            _loading = true;
+            _darkTheme.Checked = AppTheme.IsDark;
+            _loading = false;
+            Invalidate(true);
         }
 
         public void LoadFromSettings()
@@ -224,8 +172,8 @@ namespace WgSharp.Ui
             try { _guiAutoStart.Checked = LoginAutostart.IsEnabled(); }
             catch { _guiAutoStart.Checked = false; }
             _debugLog.Checked = AppSettings.DebugLog;
-            _experimental.Checked = AppSettings.ExperimentalFeatures;
             _checkUpdates.Checked = AppSettings.CheckForUpdates;
+            _darkTheme.Checked = AppTheme.IsDark;
             UpdateExclusivityEnabled();
             _loading = false;
         }
@@ -264,8 +212,6 @@ namespace WgSharp.Ui
                 _autoStart.Enabled = true;
                 _guiAutoStart.Enabled = true;
             }
-            _autoStartHelp.Enabled = !portable;
-            _guiAutoStartHelp.Enabled = !portable;
 
             // Portable mode is determined ENTIRELY by where WgSharp runs from,
             // so the checkbox is informational (checked or not) and always
@@ -282,22 +228,21 @@ namespace WgSharp.Ui
             // first-run default), so the UI can't drift from actual behavior.
             bool installedLocation = WgSharp.Core.InstallLocation.IsInstalled();
             _portable.Enabled = false;
-            _portableHelp.Enabled = false;
             if (installedLocation)
             {
                 _portable.Checked = false;
-                _portableHelp.Text = "Not available: WgSharp was installed via the MSI installer to a " +
+                _tips.SetToolTip(_portable, WrapTip("Not available: WgSharp was installed via the Setup installer to a " +
                     "fixed location, so it uses the machine config store and the background service. " +
                     "Portable mode is only for the standalone copy that travels with its own folder \u2014 " +
-                    "use the zip distribution if you need it.";
+                    "use the zip distribution if you need it."));
             }
             else
             {
                 _portable.Checked = true;
-                _portableHelp.Text = "Always on for this copy: WgSharp is running from a standalone " +
+                _tips.SetToolTip(_portable, WrapTip("Always on for this copy: WgSharp is running from a standalone " +
                     "location (not a Program Files install), so it keeps its tunnels in its own folder, " +
                     "password-encrypted, and runs them in-process. To use the machine store and the " +
-                    "background service instead, install WgSharp with the MSI installer.";
+                    "background service instead, install WgSharp with the Setup installer."));
             }
         }
 
@@ -343,7 +288,7 @@ namespace WgSharp.Ui
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this, "Couldn't " + (_autoStart.Checked ? "install" : "remove") +
+                ThemedMessageBox.Show(this, "Couldn't " + (_autoStart.Checked ? "install" : "remove") +
                     " the background service: " + ex.Message, "WgSharp",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 _loading = true;
@@ -372,7 +317,7 @@ namespace WgSharp.Ui
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this, "Couldn't " + (_guiAutoStart.Checked ? "enable" : "disable") +
+                ThemedMessageBox.Show(this, "Couldn't " + (_guiAutoStart.Checked ? "enable" : "disable") +
                     " start-at-login: " + ex.Message, "WgSharp",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 _loading = true;
@@ -396,12 +341,14 @@ namespace WgSharp.Ui
             AppSettings.Save();
         }
 
-        private void OnExperimentalChanged(object sender, EventArgs e)
+        private void OnDarkThemeChanged(object sender, EventArgs e)
         {
             if (_loading) return;
-            AppSettings.ExperimentalFeatures = _experimental.Checked;
+            AppTheme.IsDark = _darkTheme.Checked;
+            AppSettings.ThemeIsDark = AppTheme.IsDark;
+            AppSettings.ThemeOverrideSet = true;
             AppSettings.Save();
-            var h = ExperimentalFeaturesChanged;
+            var h = ThemeToggled;
             if (h != null) h();
         }
 
@@ -417,7 +364,7 @@ namespace WgSharp.Ui
                 : "Switching off portable mode will use the normal DPAPI store in " +
                   "C:\\ProgramData. Your portable tunnels won't appear until you switch " +
                   "back. Continue?";
-            if (MessageBox.Show(this, msg, "WgSharp \u2014 portable mode",
+            if (ThemedMessageBox.Show(this, msg, "WgSharp \u2014 portable mode",
                     MessageBoxButtons.OKCancel, MessageBoxIcon.Information) != DialogResult.OK)
             {
                 _loading = true;

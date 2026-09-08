@@ -26,13 +26,28 @@ namespace WgSharp.Ui
             ShowInTaskbar = false;
             ClientSize = new Size(460, 420);
             Font = new Font("Segoe UI", 9F);
+            BackColor = AppTheme.WindowBg;
+            HandleCreated += delegate
+            {
+                NativeMethods.SetDarkTitleBar(Handle, AppTheme.IsDark);
+                NativeMethods.SetBorderAndCaptionColor(Handle,
+                    AppTheme.IsDark ? AppTheme.Border : Color.Empty,
+                    AppTheme.IsDark ? AppTheme.Surface : Color.Empty);
+            };
 
             // ---- icon, like the original client's About dialog ----
+            // SizeMode=Normal, not StretchImage: PictureBox's own StretchImage
+            // draws with GDI+'s plain default settings, whose bilinear filter
+            // isn't enough for a 4:1 reduction (256x256 source down to 64x64)
+            // and leaves the circle/glyph edges visibly staircased even though
+            // the source PNG itself is cleanly anti-aliased. Pre-scaling it
+            // ourselves with HighQualityBicubic + AntiAlias below and handing
+            // PictureBox the already-correctly-sized result avoids that.
             var iconBox = new PictureBox
             {
                 Location = new Point(20, 18),
                 Size = new Size(64, 64),
-                SizeMode = PictureBoxSizeMode.StretchImage
+                SizeMode = PictureBoxSizeMode.Normal
             };
             try
             {
@@ -43,14 +58,17 @@ namespace WgSharp.Ui
                 Bitmap bmp = AppIconLoader.LoadLargestEmbeddedIcon();
                 if (bmp != null)
                 {
-                    iconBox.Image = bmp;
+                    iconBox.Image = HighQualityResize(bmp, iconBox.Width, iconBox.Height);
+                    bmp.Dispose();
                 }
                 else
                 {
-                    // Last-resort fallback: small extracted icon, stretched.
+                    // Last-resort fallback: small extracted icon, upscaled.
                     // Soft-looking, but never garbled.
                     using (Icon ico = Icon.ExtractAssociatedIcon(Application.ExecutablePath))
-                        if (ico != null) iconBox.Image = ico.ToBitmap();
+                        if (ico != null)
+                            using (Bitmap small = ico.ToBitmap())
+                                iconBox.Image = HighQualityResize(small, iconBox.Width, iconBox.Height);
                 }
             }
             catch { }
@@ -61,7 +79,8 @@ namespace WgSharp.Ui
                 Font = new Font("Segoe UI Semibold", 15F, FontStyle.Bold),
                 Location = new Point(96, 18),
                 Size = new Size(340, 28),
-                TextAlign = ContentAlignment.MiddleLeft
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = AppTheme.FieldValue
             };
 
             var subtitle = new Label
@@ -69,7 +88,7 @@ namespace WgSharp.Ui
                 Text = "An independent, from-scratch WireGuard client for Windows.",
                 Location = new Point(96, 48),
                 Size = new Size(340, 32),
-                ForeColor = Color.FromArgb(0x44, 0x44, 0x44)
+                ForeColor = AppTheme.FieldLabel
             };
 
             // ---- version / architecture / OS / driver info ----
@@ -78,7 +97,7 @@ namespace WgSharp.Ui
                 Location = new Point(20, 92),
                 Size = new Size(420, 110),
                 Font = new Font("Segoe UI", 8.5F),
-                ForeColor = Color.FromArgb(0x33, 0x33, 0x33),
+                ForeColor = AppTheme.FieldValue,
                 Text =
                     "Version: " + GetBuildVersion() + "\n" +
                     "Architecture: " + WgSharp.Tun.WintunDownloader.ArchFolder() + "\n" +
@@ -96,7 +115,7 @@ namespace WgSharp.Ui
                     "created by Jason A. Donenfeld. Their source is licensed under the\n" +
                     "GNU GPLv2; the prebuilt driver DLLs are under WireGuard LLC's own\n" +
                     "Prebuilt Binaries License. WgSharp's own code is MIT licensed.",
-                ForeColor = Color.FromArgb(0x33, 0x33, 0x33)
+                ForeColor = AppTheme.FieldValue
             };
 
             var copyright = new Label
@@ -104,7 +123,7 @@ namespace WgSharp.Ui
                 Text = "Copyright \u00A9 2026 inteliboy",
                 Location = new Point(20, 308),
                 AutoSize = true,
-                ForeColor = Color.FromArgb(0x55, 0x55, 0x55)
+                ForeColor = AppTheme.FieldLabel
             };
 
             // Measure the copyright text so we can place the GitHub link
@@ -117,7 +136,11 @@ namespace WgSharp.Ui
             {
                 Text = "github.com/inteliboy/WgSharp",
                 Location = new Point(20 + copyrightW, 308),
-                AutoSize = true
+                AutoSize = true,
+                LinkColor = AppTheme.Accent,
+                ActiveLinkColor = AppTheme.AccentHover,
+                VisitedLinkColor = AppTheme.Accent,
+                LinkBehavior = LinkBehavior.AlwaysUnderline
             };
             link.LinkClicked += delegate
             {
@@ -132,14 +155,18 @@ namespace WgSharp.Ui
                 Text = "\u2665 Support this project:",
                 Location = new Point(20, 330),
                 AutoSize = true,
-                ForeColor = Color.FromArgb(0x55, 0x55, 0x55)
+                ForeColor = AppTheme.FieldLabel
             };
 
             var coffeeLink = new LinkLabel
             {
                 Text = "buymeacoffee.com/inteliboy",
                 Location = new Point(20 + coffeeLabelW, 330),
-                AutoSize = true
+                AutoSize = true,
+                LinkColor = AppTheme.Accent,
+                ActiveLinkColor = AppTheme.AccentHover,
+                VisitedLinkColor = AppTheme.Accent,
+                LinkBehavior = LinkBehavior.AlwaysUnderline
             };
             coffeeLink.LinkClicked += delegate
             {
@@ -153,6 +180,7 @@ namespace WgSharp.Ui
                 Size = new Size(88, 28),
                 Location = new Point(ClientSize.Width - 108, ClientSize.Height - 40)
             };
+            Ctrl.FlattenButton(btnClose, true);
 
             var btnCheckUpdates = new Button
             {
@@ -160,6 +188,7 @@ namespace WgSharp.Ui
                 Size = new Size(140, 28),
                 Location = new Point(20, ClientSize.Height - 40)
             };
+            Ctrl.FlattenButton(btnCheckUpdates, false);
             btnCheckUpdates.Click += delegate { CheckForUpdatesInteractive(btnCheckUpdates); };
 
             Controls.Add(iconBox);
@@ -176,6 +205,25 @@ namespace WgSharp.Ui
 
             AcceptButton = btnClose;
             CancelButton = btnClose;
+        }
+
+        /// <summary>
+        /// Resizes to exactly (w, h) with AntiAlias + HighQualityBicubic, so a
+        /// shrink (or a growth) comes out smooth instead of showing GDI+'s
+        /// plain-default staircasing on high-contrast edges. Caller owns the
+        /// returned Bitmap's lifetime.
+        /// </summary>
+        private static Bitmap HighQualityResize(Image src, int w, int h)
+        {
+            var result = new Bitmap(w, h);
+            using (var g = System.Drawing.Graphics.FromImage(result))
+            {
+                g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
+                g.PixelOffsetMode = System.Drawing.Drawing2D.PixelOffsetMode.HighQuality;
+                g.DrawImage(src, new Rectangle(0, 0, w, h));
+            }
+            return result;
         }
 
         /// <summary>
@@ -214,48 +262,105 @@ namespace WgSharp.Ui
         {
             if (res == null)
             {
-                MessageBox.Show(owner, "Couldn't check for updates right now. Please try again later.",
+                ThemedMessageBox.Show(owner, "Couldn't check for updates right now. Please try again later.",
                     "WgSharp", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
             if (res.IsUpdateAvailable)
             {
-                var answer = MessageBox.Show(owner,
+                bool canAutoInstall = !string.IsNullOrEmpty(res.InstallerDownloadUrl);
+                var answer = ThemedMessageBox.Show(owner,
                     "A newer version is available.\r\n\r\n" +
                     "You have " + res.CurrentVersion + "; the latest is " + res.LatestVersion + ".\r\n\r\n" +
-                    "Open the download page now?",
+                    (canAutoInstall
+                        ? "Download and install it now? It installs silently in the background and " +
+                          "restarts WgSharp when done \u2014 Windows will still ask you to approve the " +
+                          "administrator prompt Setup itself requires."
+                        : "Open the download page now?"),
                     "WgSharp \u2014 update available",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Information);
-                if (answer == DialogResult.Yes)
+                if (answer != DialogResult.Yes) return;
+
+                if (!canAutoInstall)
                 {
                     try { Process.Start(res.ReleaseUrl); } catch { }
+                    return;
                 }
+
+                DownloadAndRunInstaller(owner, res);
                 return;
             }
 
             // No update. Distinguish "confirmed up to date" from "couldn't
             // reach GitHub": LatestVersion is only set when the API answered.
             if (!string.IsNullOrEmpty(res.LatestVersion))
-                MessageBox.Show(owner,
+                ThemedMessageBox.Show(owner,
                     "You're up to date.\r\n\r\nWgSharp " + res.CurrentVersion + " is the latest version.",
                     "WgSharp", MessageBoxButtons.OK, MessageBoxIcon.Information);
             else
-                MessageBox.Show(owner,
+                ThemedMessageBox.Show(owner,
                     "Couldn't reach GitHub to check for updates. Please check your connection and try again.",
                     "WgSharp", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         /// <summary>
+        /// Downloads res.InstallerDownloadUrl (the release's WgSharp-Setup.exe
+        /// asset) to a temp file, then launches it SILENTLY ("/S" — see
+        /// UpdateChecker.LaunchInstallerSilently) and exits WgSharp so Setup
+        /// can replace it cleanly with no wizard for the user to click through.
+        /// installer\WgSharp.nsi's own close-detection (CloseWgSharp.ps1) would
+        /// handle a still-running WgSharp anyway, but exiting here first is the
+        /// smoother path for a user-initiated update: no window flash from
+        /// Setup force-closing us mid-flow. Falls back to opening the release
+        /// page in a browser on any failure (download error, launch failure) -
+        /// never leaves the user stuck with nothing to click.
+        /// </summary>
+        private static void DownloadAndRunInstaller(IWin32Window owner, WgSharp.Core.UpdateChecker.Result res)
+        {
+            Control marshalOn = owner as Control;
+
+            WgSharp.Core.UpdateChecker.DownloadInstallerAsync(res.InstallerDownloadUrl, delegate (string localPath, Exception err)
+            {
+                Action finish = delegate
+                {
+                    if (err != null || string.IsNullOrEmpty(localPath))
+                    {
+                        ThemedMessageBox.Show(owner,
+                            "Couldn't download the update. Opening the release page instead.",
+                            "WgSharp", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        try { Process.Start(res.ReleaseUrl); } catch { }
+                        return;
+                    }
+                    try
+                    {
+                        WgSharp.Core.UpdateChecker.LaunchInstallerSilently(localPath);
+                        Application.Exit();
+                    }
+                    catch
+                    {
+                        try { Process.Start(res.ReleaseUrl); } catch { }
+                    }
+                };
+                try
+                {
+                    if (marshalOn != null && marshalOn.IsHandleCreated && marshalOn.InvokeRequired)
+                        marshalOn.BeginInvoke(finish);
+                    else
+                        finish();
+                }
+                catch { try { finish(); } catch { } }
+            });
+        }
+
+        /// <summary>
         /// Reads the exe's own embedded version: "1.YY.MMDD.0", stamped by
         /// build.cmd into AssemblyInformationalVersion at build time (see
-        /// build.cmd and src/core/AssemblyInfo.generated.cs). The MSI
+        /// build.cmd and src/core/AssemblyInfo.generated.cs). The Setup
         /// installer (if built) uses the leading 3 fields of this same date
-        /// encoding for its own ProductVersion, "1.YY.MMDD" -- Windows
-        /// Installer's version field is strictly 3-part, so it can't carry
-        /// the trailing ".0" the exe's 4-part assembly version fields use,
-        /// but both are stamped from the exact same YY/MM/DD digits in one
-        /// place in build.cmd.
+        /// encoding for its own DisplayVersion, "1.YY.MMDD" -- shown in
+        /// Add/Remove Programs -- and both are stamped from the exact same
+        /// YY/MM/DD digits in one place in build.cmd.
         /// </summary>
         private static string GetBuildVersion()
         {

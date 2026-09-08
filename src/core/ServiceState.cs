@@ -9,7 +9,7 @@ namespace WgSharp.Core
     /// boot, before anyone logs in). Cleared on an explicit disconnect.
     ///
     /// Stored in HKEY_LOCAL_MACHINE\Software\WgSharp (LastTunnel) so:
-    ///   - It survives MSI upgrades without special installer logic.
+    ///   - It survives Setup upgrades without special installer logic.
     ///   - The background service (LocalSystem) can read the same value the
     ///     GUI (an elevated user process) writes — no session boundary issues.
     ///   - No ProgramData directory creation needed.
