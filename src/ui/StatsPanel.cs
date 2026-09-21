@@ -178,6 +178,11 @@ namespace WgSharp.Ui
             _downChart.Push(downRate);
             _upChart.Push(upRate);
 
+            // Chart history above keeps accumulating regardless; the summary
+            // labels are only worth touching (each is a layout + repaint)
+            // while this tab is actually on screen.
+            if (!Visible) return;
+
             _lblDown.Text = FmtRate(downRate);
             _lblUp.Text = FmtRate(upRate);
             _lblTotal.Text = FmtBytes(s.RxBytes) + " down / " + FmtBytes(s.TxBytes) + " up";

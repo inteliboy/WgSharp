@@ -13,6 +13,7 @@ namespace WgSharp.Ui
     {
         public static readonly Font LabelFont = new Font("Segoe UI", 9F);
         public static readonly Font ValueFont = new Font("Segoe UI", 9F);
+        public static readonly Font KeyFont = new Font("Consolas", 9F);
 
         /// <summary>Add a row whose value is an arbitrary control (e.g. a StatusRow).</summary>
         public static void AddCustomRow(TableLayoutPanel t, string label, Control valueControl)
@@ -102,7 +103,7 @@ namespace WgSharp.Ui
 
             var val = new Label();
             val.Text = value;
-            val.Font = new Font("Consolas", 9F);  // monospace, like the official key display
+            val.Font = KeyFont;  // monospace, like the official key display
             val.ForeColor = AppTheme.FieldValue;
             val.TextAlign = ContentAlignment.MiddleLeft;
             val.Dock = DockStyle.Fill;

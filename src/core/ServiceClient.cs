@@ -86,6 +86,39 @@ namespace WgSharp.Core
         }
 
         /// <summary>
+        /// Incremental log fetch (LOG2): sends the epoch/cursor from the last
+        /// call and gets back only lines added since. Returns false if the
+        /// service is unreachable OR doesn't know LOG2 (an older service), in
+        /// which case supported distinguishes the two so the caller can fall
+        /// back to the full LOG command.
+        /// </summary>
+        public static bool FetchServiceLogSince(ref string epoch, ref long cursor,
+                                                out string[] lines, out bool supported)
+        {
+            lines = new string[0];
+            supported = true;
+            string resp = SendCommand("LOG2|" + (epoch ?? "-") + "|" + cursor);
+            if (resp == null) return false;
+            if (!resp.StartsWith("LOG2|", StringComparison.Ordinal))
+            {
+                supported = false;
+                return false;
+            }
+            // LOG2|<epoch>|<total>|<payload>
+            int a = resp.IndexOf('|', 5);
+            if (a < 0) return false;
+            int b = resp.IndexOf('|', a + 1);
+            if (b < 0) return false;
+            long total;
+            if (!long.TryParse(resp.Substring(a + 1, b - a - 1), out total)) return false;
+            epoch = resp.Substring(5, a - 5);
+            cursor = total;
+            string payload = ServiceProtocol.Unescape(resp.Substring(b + 1));
+            if (payload.Length > 0) lines = payload.Split('\n');
+            return true;
+        }
+
+        /// <summary>
         /// Pulls the service's recent in-memory log (the LOG command) and
         /// returns it as individual lines, oldest-first, or an empty array if
         /// the service isn't reachable or has nothing. Lets the GUI surface

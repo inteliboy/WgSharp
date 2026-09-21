@@ -330,6 +330,13 @@ namespace WgSharp.Svc
                 string snap = DrainLogSnapshot();
                 reply = "LOG|" + ServiceProtocol.Escape(snap);
             }
+            else if (verb == "LOG2")
+            {
+                // Incremental variant of LOG: "LOG2|<epoch>|<since>" returns
+                // "LOG2|<epoch>|<total>|<escaped new lines>" so an idle poll
+                // costs a few bytes instead of the whole ring every second.
+                reply = DrainLogSince(rest);
+            }
             else if (verb == "ACTIVATE" || verb == "ACTIVATE2" || verb == "DEACTIVATE" ||
                      verb == "SAVECONFIG" || verb == "DELETECONFIG")
             {
@@ -506,6 +513,7 @@ namespace WgSharp.Svc
             lock (_logLock)
             {
                 _logRing.Enqueue(stamped);
+                _logTotal++;
                 while (_logRing.Count > LogRingMax) _logRing.Dequeue();
             }
 
@@ -523,6 +531,43 @@ namespace WgSharp.Svc
                 }
             }
             catch { }
+        }
+
+        // Lines ever enqueued (monotonic) plus a per-process epoch, so a client
+        // can ask for "everything after line N" and notice a service restart.
+        private long _logTotal;
+        private readonly string _logEpoch = Guid.NewGuid().ToString("N");
+
+        private string DrainLogSince(string args)
+        {
+            string epoch = null;
+            long since = 0;
+            if (args != null)
+            {
+                int bar = args.IndexOf('|');
+                if (bar > 0)
+                {
+                    epoch = args.Substring(0, bar);
+                    long.TryParse(args.Substring(bar + 1), out since);
+                }
+            }
+            lock (_logLock)
+            {
+                // Unknown epoch (first call, or service restarted) or a bogus
+                // cursor: send the whole ring.
+                if (epoch != _logEpoch || since < 0 || since > _logTotal) since = 0;
+                long missing = _logTotal - since;
+                int take = (int)Math.Min(missing, (long)_logRing.Count);
+                string payload = "";
+                if (take > 0)
+                {
+                    string[] all = _logRing.ToArray();
+                    string[] part = new string[take];
+                    Array.Copy(all, all.Length - take, part, 0, take);
+                    payload = string.Join("\n", part);
+                }
+                return "LOG2|" + _logEpoch + "|" + _logTotal + "|" + ServiceProtocol.Escape(payload);
+            }
         }
 
         /// <summary>Snapshot of the ring buffer, oldest-first, joined by newlines.</summary>

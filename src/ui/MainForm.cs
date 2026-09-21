@@ -57,6 +57,8 @@ namespace WgSharp.Ui
         private bool _dragCandidate;
 
         // value labels we refresh on each status tick
+        private byte[] _pubKeyFor;
+        private string _pubKeyText;
         private StatusRow _statusRow;
         private Label _valListenPort, _valAddresses, _valDns, _valMtu, _valKeepalive;
         private Label _valPubKey, _valPeerPubKey;
@@ -1158,8 +1160,22 @@ namespace WgSharp.Ui
         }
 
         // ---------------- build the Interface/Peer field rows ----------------
+        private Panel _actHost;
+
         private void BuildDetail()
         {
+            // One layout pass for the whole rebuild instead of one per
+            // Controls.Add, and dispose what we throw away: Controls.Clear()
+            // only detaches, so every rebuild used to leak a full set of
+            // Label/TableLayoutPanel window handles.
+            pnlDetail.SuspendLayout();
+            grpInterface.SuspendLayout();
+            grpPeer.SuspendLayout();
+            var stale = new System.Collections.Generic.List<Control>();
+            foreach (Control c in grpInterface.Controls) stale.Add(c);
+            foreach (Control c in grpPeer.Controls) stale.Add(c);
+            if (_actHost != null) stale.Add(_actHost);
+
             grpInterface.Controls.Clear();
             grpPeer.Controls.Clear();
             grpInterface.ForeColor = AppTheme.GroupText;
@@ -1174,7 +1190,18 @@ namespace WgSharp.Ui
 
             string pub = "(set private key)";
             if (_config != null && _config.PrivateKey != null)
-                pub = FieldGrid.FormatKey(Curve25519.ScalarMultBase(_config.PrivateKey));
+            {
+                // X25519 base-point multiply is noticeably slow on low-end
+                // CPUs and BuildDetail runs on every selection/theme/activate
+                // change; the Config (and so this array) is only replaced on
+                // reparse, so cache by reference. No copy of the key is kept.
+                if (!ReferenceEquals(_pubKeyFor, _config.PrivateKey))
+                {
+                    _pubKeyText = FieldGrid.FormatKey(Curve25519.ScalarMultBase(_config.PrivateKey));
+                    _pubKeyFor = _config.PrivateKey;
+                }
+                pub = _pubKeyText;
+            }
             _valPubKey = FieldGrid.AddKeyRow(gi, "Public key", pub);
 
             // Listen port: only show if explicitly set (the official app shows the
@@ -1262,7 +1289,8 @@ namespace WgSharp.Ui
             int valueColumnX = grpInterface.Padding.Left + 6 /* FieldGrid.Create()'s own Padding.Left */
                 + 140 /* FieldGrid's label column width */;
             btnActivate.Location = new Point(valueColumnX, 7);
-            actHost.Controls.Add(btnActivate);
+            actHost.Controls.Add(btnActivate); // re-parents it out of the old host
+            _actHost = actHost;
 
             // Rebuild the top-docked stack: Peer, Activate strip, Interface (reverse add).
             pnlDetail.Controls.Clear();
@@ -1274,6 +1302,14 @@ namespace WgSharp.Ui
             PositionEditButton();
 
             UpdateActivateButton();
+
+            grpPeer.ResumeLayout(false);
+            grpInterface.ResumeLayout(false);
+            pnlDetail.ResumeLayout(true);
+
+            // Only now that btnActivate/btnEdit live under the new hosts is it
+            // safe to dispose the old ones.
+            foreach (Control c in stale) c.Dispose();
         }
 
         private void PositionEditButton()
@@ -1321,7 +1357,7 @@ namespace WgSharp.Ui
             // NotifyIcon.Text has a long-standing ~63-character practical limit
             // on Windows; truncate defensively rather than let it silently fail.
             if (text.Length > 63) text = text.Substring(0, 60) + "...";
-            notifyIcon.Text = text;
+            if (notifyIcon.Text != text) notifyIcon.Text = text;
         }
 
         private void OnTrayIconDoubleClick(object sender, EventArgs e)
@@ -1772,7 +1808,12 @@ namespace WgSharp.Ui
                         // without waiting for the first 1s timer tick.
                         if (_tunnel is RemoteTunnelBackend) ThreadPool.QueueUserWorkItem(delegate
                         {
-                            try { WgSharp.Core.ServiceLogPump.Pump(); } catch { }
+                            try
+                            {
+                                WgSharp.Core.ServiceLogPump.ResetBackoff();
+                                WgSharp.Core.ServiceLogPump.Pump();
+                            }
+                            catch { }
                         });
                     }));
                 }
@@ -1838,26 +1879,57 @@ namespace WgSharp.Ui
         }
 
         // ---------------- live status ----------------
+        // 1 while a background poll (service log pump + STATUS) is in flight.
+        // The tick fires on the UI thread, and both calls are blocking
+        // named-pipe round trips (each with a multi-second connect timeout);
+        // doing them inline meant the UI thread stalled every second, most
+        // visibly as a stuttering window drag (WM_TIMER is still delivered
+        // inside the modal move/size loop). So the I/O runs on the thread
+        // pool and only the cheap result application comes back here. A tick
+        // that finds the previous poll still running just skips.
+        private int _pollBusy;
+
         private void OnStatusTick(object sender, EventArgs e)
         {
-            // Pull any new lines from the service's in-memory log into our Log
-            // tab (no service.log file needed) regardless of whether a tunnel
-            // is active here — the service does plenty even when idle
-            // (startup, driver bootstrap, a boot-time reconnect that failed),
-            // and gating this on an active tunnel used to mean the GUI was
-            // blind to service activity for the whole span between a restart
-            // and the next successful activation, if there ever was one.
-            // Cheap STATUS-class pipe call either way.
-            try { WgSharp.Core.ServiceLogPump.Pump(); } catch { }
+            if (Interlocked.CompareExchange(ref _pollBusy, 1, 0) != 0) return;
 
+            ITunnelBackend tunnel = _tunnel;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                TunnelStatus live = null;
+                // Pull any new lines from the service's in-memory log into our
+                // Log tab regardless of whether a tunnel is active here — the
+                // service does plenty even when idle (startup, driver
+                // bootstrap, a boot-time reconnect that failed).
+                try { WgSharp.Core.ServiceLogPump.Pump(); } catch { }
+                try { if (tunnel != null) live = tunnel.GetStatus(); } catch { }
+
+                try
+                {
+                    if (IsDisposed) { _pollBusy = 0; return; }
+                    BeginInvoke(new Action(delegate
+                    {
+                        _pollBusy = 0;
+                        if (live != null && tunnel == _tunnel) ApplyStatus(live);
+                    }));
+                }
+                catch (Exception)
+                {
+                    // Form gone or handle not created yet: don't leave the
+                    // in-flight guard set, the next tick can retry.
+                    _pollBusy = 0;
+                }
+            });
+        }
+
+        // UI-thread half of the status tick: applies a status snapshot that
+        // the pool thread already fetched.
+        private void ApplyStatus(TunnelStatus live)
+        {
             if (_tunnel == null) return;
-
-            // The list shield always reflects live state...
-            lstTunnels.Invalidate();
 
             // Always feed the Stats tab (it tracks the running tunnel regardless of
             // which tunnel is currently displayed in the Tunnels tab).
-            var live = _tunnel.GetStatus();
             if (_statsPanel != null) _statsPanel.UpdateStats(live);
             UpdateTrayTooltip(live.State);
 
@@ -1890,7 +1962,6 @@ namespace WgSharp.Ui
             if (_valTransfer != null)
                 _valTransfer.Text = FormatBytes(s.RxBytes) + " received, " + FormatBytes(s.TxBytes) + " sent";
             if (_valEndpoint != null) _valEndpoint.Text = s.Endpoint;
-            lstTunnels.Invalidate();
 
             // Self-healing: if this was an auto-reconnect and we've been stuck
             // Negotiating for ~12 seconds, do one silent disconnect+reconnect.

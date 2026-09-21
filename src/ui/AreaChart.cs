@@ -20,6 +20,12 @@ namespace WgSharp.Ui
         private Color _line = Color.FromArgb(0x3A, 0x6E, 0xA5);
         private Func<double, string> _fmt;
 
+        // Created once, not per paint: GDI+ font creation is comparatively
+        // expensive and this repaints every second on a low-end machine.
+        private static readonly Font TitleFont = new Font("Segoe UI", 8.5F, FontStyle.Bold);
+        private static readonly Font ScaleFont = new Font("Segoe UI", 7F);
+        private static readonly Font LegendFont = new Font("Consolas", 8F);
+
         public AreaChart()
         {
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
@@ -40,7 +46,9 @@ namespace WgSharp.Ui
             if (value < 0) value = 0;
             _data.Enqueue(value);
             while (_data.Count > _capacity) _data.Dequeue();
-            Invalidate();
+            // Nothing to paint while the Stats tab isn't showing or the window
+            // is hidden in the tray; the next show repaints from _data anyway.
+            if (Visible) Invalidate();
         }
 
         public void Reset() { _data.Clear(); Invalidate(); }
@@ -83,12 +91,12 @@ namespace WgSharp.Ui
 
             // title
             using (var tb = new SolidBrush(AppTheme.GroupText))
-            using (var tf = new Font("Segoe UI", 8.5F, FontStyle.Bold))
-                g.DrawString(_title, tf, tb, plot.Left, 4);
+                g.DrawString(_title, TitleFont, tb, plot.Left, 4);
 
             double[] vals = _data.ToArray();
-            double max = 1;
-            foreach (double v in vals) if (v > max) max = v;
+            double max = 1, mx = 0, avg = 0;
+            foreach (double v in vals) { if (v > max) max = v; if (v > mx) mx = v; avg += v; }
+            if (vals.Length > 0) avg /= vals.Length;
             // round max up for a nicer scale
             max = NiceCeil(max);
 
@@ -96,7 +104,6 @@ namespace WgSharp.Ui
             // gutter just past the plot's right border — which is now inside
             // the control, not spilling toward the window edge.
             using (var gp = new Pen(AppTheme.PlotGrid))
-            using (var lf = new Font("Segoe UI", 7F))
             using (var lb = new SolidBrush(AppTheme.FieldLabel))
             {
                 for (int i = 0; i <= 4; i++)
@@ -104,7 +111,7 @@ namespace WgSharp.Ui
                     int y = plot.Top + plot.Height * i / 4;
                     g.DrawLine(gp, plot.Left, y, plot.Right, y);
                     double gv = max * (4 - i) / 4.0;
-                    g.DrawString(_fmt(gv), lf, lb, plot.Right + 4, y - 6);
+                    g.DrawString(_fmt(gv), ScaleFont, lb, plot.Right + 4, y - 6);
                 }
             }
 
@@ -134,17 +141,14 @@ namespace WgSharp.Ui
 
             // legend: current / avg / max
             double cur = vals.Length > 0 ? vals[vals.Length - 1] : 0;
-            double avg = 0; foreach (double v in vals) avg += v; if (vals.Length > 0) avg /= vals.Length;
-            double mx = 0; foreach (double v in vals) if (v > mx) mx = v;
 
-            using (var lf = new Font("Consolas", 8F))
             using (var sw = new SolidBrush(_line))
             {
                 int ly = plot.Bottom + 8;
                 g.FillRectangle(sw, plot.Left, ly + 2, 9, 9);
                 using (var tb = new SolidBrush(AppTheme.FieldValue))
                     g.DrawString("Cur " + _fmt(cur) + "    Avg " + _fmt(avg) + "    Max " + _fmt(mx),
-                        lf, tb, plot.Left + 14, ly);
+                        LegendFont, tb, plot.Left + 14, ly);
             }
         }
 

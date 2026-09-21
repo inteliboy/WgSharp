@@ -26,6 +26,7 @@ namespace WgSharp.Ui
 
         public void Set(string text, Color color, bool active)
         {
+            if (_text == text && _color == color && _active == active) return;
             _text = text; _color = color; _active = active;
             Invalidate();
         }

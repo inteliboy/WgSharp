@@ -96,9 +96,25 @@ namespace WgSharp.Ui
                       ControlStyles.ResizeRedraw | ControlStyles.OptimizedDoubleBuffer, true);
         }
 
+        // DisplayRectangle is queried on every layout pass and paint; the
+        // measured height only depends on the font (and on whether there is
+        // a caption at all, which only affects the sample string, not the
+        // line height), so measure once per font instead of every call.
+        private Font _measuredFont;
+        private int _labelAreaHeight;
+
         int LabelAreaHeight
         {
-            get { return TextRenderer.MeasureText(string.IsNullOrEmpty(Text) ? "Ag" : Text, Font).Height + 6; }
+            get
+            {
+                Font f = Font;
+                if (!ReferenceEquals(f, _measuredFont) || _labelAreaHeight == 0)
+                {
+                    _labelAreaHeight = TextRenderer.MeasureText("Ag", f).Height + 6;
+                    _measuredFont = f;
+                }
+                return _labelAreaHeight;
+            }
         }
 
         public override Rectangle DisplayRectangle
