@@ -257,6 +257,8 @@ namespace WgSharp.Ui
                     }
                 }
 
+                AdjustExposureFromFrame(frame);
+
                 // Decode is more expensive than a paint, so don't run it on
                 // every fast preview tick — roughly 2-3 times a second is
                 // plenty for a QR held up to the camera, and keeps the preview
@@ -264,7 +266,13 @@ namespace WgSharp.Ui
                 if (!blank && (_ticks - _lastDecodeTick) >= DecodeEveryTicks)
                 {
                     _lastDecodeTick = _ticks;
-                    string text = QrImageLocator.TryDecodeFrame(frame);
+                    string diag;
+                    string text = QrImageLocator.TryDecodeFrame(frame, out diag);
+                    if (text == null && diag != null)
+                    {
+                        if ((_failedDecodes++ % 10) == 0) L("Decode attempt on " + frame.Width + "x" + frame.Height + " frame failed: " + diag);
+                        _status.Text = "Looking for a QR code… (" + diag + ")";
+                    }
                     if (text != null)
                     {
                         L("QR decoded from a webcam frame (" + text.Length + " chars).");
@@ -290,6 +298,47 @@ namespace WgSharp.Ui
         /// than every pixel — this only needs to be a cheap, reliable signal,
         /// not a precise measurement, and runs every 400ms.
         /// </summary>
+        private const int ExposureSettleTicks = 4; // ~0.6s between steps so the sensor settles
+        private long _lastExposureTick;
+        private bool _exposureManual;
+        private int _failedDecodes;
+
+        /// <summary>
+        /// Closed-loop exposure: auto-exposure meters the dim room, so a bright phone
+        /// screen saturates to a featureless white block (no QR detail left for any
+        /// decoder). Samples the frame's brightest percentile and saturated area and steps
+        /// exposure down while it's blown out, back up if manual mode left it too dark.
+        /// </summary>
+        private void AdjustExposureFromFrame(Bitmap frame)
+        {
+            if (_cam == null || _ticks - _lastExposureTick < ExposureSettleTicks) return;
+            const int gx = 40, gy = 24;
+            int[] lums = new int[gx * gy];
+            int saturated = 0;
+            for (int j = 0; j < gy; j++)
+                for (int i = 0; i < gx; i++)
+                {
+                    Color c = frame.GetPixel((i * 2 + 1) * frame.Width / (gx * 2), (j * 2 + 1) * frame.Height / (gy * 2));
+                    int l = (c.R * 299 + c.G * 587 + c.B * 114) / 1000;
+                    lums[j * gx + i] = l;
+                    if (l >= 245) saturated++;
+                }
+            Array.Sort(lums);
+            int p99 = lums[lums.Length - 1 - lums.Length / 100];
+            double satFrac = (double)saturated / lums.Length;
+
+            if (satFrac > 0.03)
+            {
+                _lastExposureTick = _ticks;
+                if (_cam.AdjustExposure(-1)) _exposureManual = true;
+            }
+            else if (_exposureManual && p99 < 140)
+            {
+                _lastExposureTick = _ticks;
+                _cam.AdjustExposure(+1);
+            }
+        }
+
         private static bool IsLikelyBlank(Bitmap bmp)
         {
             const int gridSize = 12;

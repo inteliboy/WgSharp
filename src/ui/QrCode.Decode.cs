@@ -237,7 +237,11 @@ namespace WgSharp.Ui
                 byte omegaVal = EvalLowHorner(omega, xinv);
                 byte derivVal = EvalLowHorner(deriv, xinv);
                 if (derivVal == 0) return null; // shouldn't happen; guards a divide-by-zero
-                byte mag = GfMul(omegaVal, GfInverse(derivVal));
+                // Forney with first consecutive root alpha^0 (QR's generator): the magnitude is
+                // X * Omega(1/X) / sigma'(1/X), where X = alpha^-e is the error locator. Without
+                // the leading X every magnitude is wrong and the post-check below always rejects
+                // the block, so ANY single bad module made a whole code undecodable.
+                byte mag = GfMul(GfMul(omegaVal, GfInverse(derivVal)), GfInverse(xinv));
                 corrected[positions[i]] ^= mag;
             }
 

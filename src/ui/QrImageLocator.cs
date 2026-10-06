@@ -12,12 +12,12 @@ namespace WgSharp.Ui
     ///
     /// Scope/limitations (read before relying on this for anything beyond
     /// "scan a tunnel QR off a phone/monitor held up to the webcam"):
-    /// - Detection assumes the QR is reasonably flat and facing the camera.
-    ///   It models the grid with an AFFINE transform (in-plane rotation is
-    ///   handled fine; strong keystone/perspective skew is not) — full
-    ///   perspective correction is out of scope here.
-    /// - Binarization is a single global-average luminance threshold, not
-    ///   adaptive — uneven lighting across the frame can hurt detection.
+    /// - The grid is modelled with an AFFINE transform from the three finder
+    ///   centers (in-plane rotation is fine), then, for version 2+ codes, a
+    ///   PERSPECTIVE homography that adds the bottom-right alignment pattern
+    ///   as a fourth control point. The affine grid remains as a fallback.
+    /// - Binarization tries an adaptive local-mean threshold first, then a
+    ///   single global-average threshold as a fallback.
     /// - It does not know in advance which of the three found finder patterns
     ///   is top-left/top-right/bottom-left, or in which rotational sense, so
     ///   it brute-forces every assignment of the candidates it finds and lets
@@ -39,10 +39,33 @@ namespace WgSharp.Ui
         /// </summary>
         public static string TryDecodeFrame(Bitmap frame, out string diagnostic)
         {
+            // Adaptive (local-mean) threshold first: it survives uneven exposure,
+            // glare gradients and a bright phone screen in a dim room, which is what
+            // a hand-held webcam scan actually looks like. The global-mean threshold
+            // stays as a fallback since it is cleaner on flat, evenly lit images
+            // (screenshots, scanned files).
+            string text = TryDecodeBinarized(frame, true, false, out diagnostic);
+            if (text != null) return text;
+            string other;
+            text = TryDecodeBinarized(frame, false, false, out other);
+            if (text != null) { diagnostic = null; return text; }
+            // Light-on-dark QR (some phone dark themes render it inverted): only worth the
+            // extra pass when the normal ones found nothing usable.
+            text = TryDecodeBinarized(frame, true, true, out other);
+            if (text != null) { diagnostic = null; return text; }
+            return null;
+        }
+
+        private static string TryDecodeBinarized(Bitmap frame, bool adaptive, bool invert, out string diagnostic)
+        {
             diagnostic = null;
             bool[,] dark;
             int w, h;
-            Binarize(frame, out dark, out w, out h);
+            Binarize(frame, adaptive, out dark, out w, out h);
+            if (invert)
+                for (int y = 0; y < h; y++)
+                    for (int x = 0; x < w; x++)
+                        dark[y, x] = !dark[y, x];
 
             List<float[]> candidates = FindFinderCandidates(dark, w, h);
             if (candidates.Count < 3)
@@ -92,7 +115,7 @@ namespace WgSharp.Ui
         }
 
         // ---------------- binarization ----------------
-        private static void Binarize(Bitmap bmp, out bool[,] dark, out int w, out int h)
+        private static void Binarize(Bitmap bmp, bool adaptive, out bool[,] dark, out int w, out int h)
         {
             w = bmp.Width;
             h = bmp.Height;
@@ -129,10 +152,50 @@ namespace WgSharp.Ui
                             sum += l;
                         }
                     }
-                    byte avg = (byte)(sum / Math.Max(1, w * h));
-                    for (int y = 0; y < h; y++)
-                        for (int x = 0; x < w; x++)
-                            dark[y, x] = lum[y * w + x] < avg;
+                    if (!adaptive)
+                    {
+                        byte avg = (byte)(sum / Math.Max(1, w * h));
+                        for (int y = 0; y < h; y++)
+                            for (int x = 0; x < w; x++)
+                                dark[y, x] = lum[y * w + x] < avg;
+                    }
+                    else
+                    {
+                        // Local mean over a window ~1/8 of the short side (wider than a
+                        // finder pattern at typical scan distances), via an integral image
+                        // so cost is O(pixels). A pixel is dark if it is clearly below its
+                        // neighbourhood mean; the 8% margin keeps sensor noise in flat
+                        // regions from turning into speckle.
+                        int win = Math.Max(15, Math.Min(w, h) / 8) | 1;
+                        int r = win / 2;
+                        int iw = w + 1;
+                        long[] integral = new long[iw * (h + 1)];
+                        for (int y = 0; y < h; y++)
+                        {
+                            long rowSum = 0;
+                            for (int x = 0; x < w; x++)
+                            {
+                                rowSum += lum[y * w + x];
+                                integral[(y + 1) * iw + x + 1] = integral[y * iw + x + 1] + rowSum;
+                            }
+                        }
+                        for (int y = 0; y < h; y++)
+                        {
+                            int y0 = Math.Max(0, y - r), y1 = Math.Min(h, y + r + 1);
+                            for (int x = 0; x < w; x++)
+                            {
+                                int x0 = Math.Max(0, x - r), x1 = Math.Min(w, x + r + 1);
+                                long area = (long)(x1 - x0) * (y1 - y0);
+                                long s = integral[y1 * iw + x1] - integral[y0 * iw + x1]
+                                       - integral[y1 * iw + x0] + integral[y0 * iw + x0];
+                                long v = (long)lum[y * w + x] * area;
+                                // clearly below the local mean, both relatively (8%) and
+                                // absolutely (8 levels) so noise in flat or dark areas
+                                // doesn't become speckle
+                                dark[y, x] = v * 100 < s * 92 && v + 8 * area < s;
+                            }
+                        }
+                    }
                 }
                 finally { working.UnlockBits(bd); }
             }
@@ -379,15 +442,31 @@ namespace WgSharp.Ui
             // A real QR's two finder-to-finder sides are equal length; reject
             // wildly unequal triples cheaply before doing a full grid sample.
             if (distBL < distTR * 0.4f || distBL > distTR * 2.5f) yield break;
+            // Real finder triple: right angle at tl (loosened for perspective) and the
+            // right handedness of an unmirrored image (tr clockwise of bl in y-down
+            // pixel space). Cuts the brute-forced permutations to the few that can be real.
+            float cross = dxTR * dyBL - dyTR * dxBL;
+            if (cross <= 0f) yield break;
+            float cosAngle = (dxTR * dxBL + dyTR * dyBL) / (distTR * distBL);
+            if (Math.Abs(cosAngle) > 0.4f) yield break;
 
             float avgModulePx = (tl[2] + tr[2] + bl[2]) / 3f;
             if (avgModulePx < 0.5f) yield break;
 
-            foreach (int size in SizeCandidates(distTR, avgModulePx))
+            // Mean of both sides: under perspective one side is foreshortened, which would
+            // bias the module count (and so the whole version guess) low.
+            foreach (int size in SizeCandidates((distTR + distBL) / 2f, avgModulePx))
             {
                 int modulesPerSide = size - 7;
                 float xAxisX = dxTR / modulesPerSide, xAxisY = dyTR / modulesPerSide;
                 float yAxisX = dxBL / modulesPerSide, yAxisY = dyBL / modulesPerSide;
+                // Vote over ~40% of the module's width around its center instead of reading one
+                // pixel: webcam noise and a phone screen's own pixel texture flip lone pixels
+                // (measured: ~7% of modules misread on a sharp frame, far past what
+                // Reed-Solomon can repair).
+                float modPx = Math.Min((float)Math.Sqrt(xAxisX * xAxisX + xAxisY * xAxisY),
+                                       (float)Math.Sqrt(yAxisX * yAxisX + yAxisY * yAxisY));
+                int voteRadius = modPx >= 3f ? (int)Math.Round(modPx * 0.2f) : 0;
 
                 // origin = pixel position of module (0,0)'s corner. The finder
                 // pattern's own center sits at module coordinate (3.5, 3.5)
@@ -407,11 +486,156 @@ namespace WgSharp.Ui
                         float py = originY + (c + 0.5f) * xAxisY + (r + 0.5f) * yAxisY;
                         int ix = (int)Math.Round(px), iy = (int)Math.Round(py);
                         if (ix < 0 || iy < 0 || ix >= w || iy >= h) { outOfBounds = true; break; }
-                        grid[r, c] = dark[iy, ix];
+                        grid[r, c] = SampleModule(dark, w, h, ix, iy, voteRadius);
+                    }
+                }
+                // Perspective-corrected grid first (when the 4th control point, the
+                // bottom-right alignment pattern, can be found), the affine grid after.
+                // The affine model puts the far corner several modules off under even
+                // mild keystone on a dense code - fatal at version 10+ - while the
+                // alignment pattern pins that corner down.
+                if (size >= 25)
+                {
+                    float ac = size - 6.5f;
+                    float predX = originX + ac * xAxisX + ac * yAxisX;
+                    float predY = originY + ac * xAxisY + ac * yAxisY;
+                    float axf, ayf;
+                    if (FindAlignmentCenter(dark, w, h, predX, predY, xAxisX, xAxisY, yAxisX, yAxisY, out axf, out ayf))
+                    {
+                        double[] hm = SolveHomography(
+                            new double[] { 3.5, size - 3.5, 3.5, ac },
+                            new double[] { 3.5, 3.5, size - 3.5, ac },
+                            new double[] { tl[0], tr[0], bl[0], axf },
+                            new double[] { tl[1], tr[1], bl[1], ayf });
+                        if (hm != null)
+                        {
+                            bool[,] pg = new bool[size, size];
+                            bool pgOut = false;
+                            for (int r = 0; r < size && !pgOut; r++)
+                            {
+                                for (int c = 0; c < size; c++)
+                                {
+                                    double u = c + 0.5, v = r + 0.5;
+                                    double den = hm[6] * u + hm[7] * v + 1.0;
+                                    if (Math.Abs(den) < 1e-9) { pgOut = true; break; }
+                                    int ix = (int)Math.Round((hm[0] * u + hm[1] * v + hm[2]) / den);
+                                    int iy = (int)Math.Round((hm[3] * u + hm[4] * v + hm[5]) / den);
+                                    if (ix < 0 || iy < 0 || ix >= w || iy >= h) { pgOut = true; break; }
+                                    pg[r, c] = SampleModule(dark, w, h, ix, iy, voteRadius);
+                                }
+                            }
+                            if (!pgOut) yield return pg;
+                        }
                     }
                 }
                 if (!outOfBounds) yield return grid;
             }
+        }
+
+        // Majority vote of the binarized pixels in a (2r+1)^2 square around (x,y).
+        private static bool SampleModule(bool[,] dark, int w, int h, int x, int y, int r)
+        {
+            if (r <= 0) return dark[y, x];
+            int count = 0, total = 0;
+            for (int yy = Math.Max(0, y - r); yy <= Math.Min(h - 1, y + r); yy++)
+                for (int xx = Math.Max(0, x - r); xx <= Math.Min(w - 1, x + r); xx++)
+                { total++; if (dark[yy, xx]) count++; }
+            return count * 2 > total;
+        }
+
+        // Finds the center of the bottom-right alignment pattern (5x5 modules: dark
+        // ring, light ring, dark center) near its affine-predicted position. Under real
+        // perspective the affine prediction can be many modules off (one hand-held
+        // phone frame measured ~10), so this searches +-14 modules: a coarse template
+        // match first, then a 1px refinement around the winner. Needs a near-perfect
+        // match (>= 22 of 25 cells) so random texture can't masquerade as one; among
+        // equally good matches the one nearest the prediction wins.
+        private static bool FindAlignmentCenter(bool[,] dark, int w, int h, float predX, float predY,
+            float xAx, float xAy, float yAx, float yAy, out float cx, out float cy)
+        {
+            cx = cy = 0;
+            float mod = (float)Math.Sqrt(xAx * xAx + xAy * xAy);
+            int range = (int)Math.Ceiling(14f * mod);
+            int step = Math.Max(2, (int)(mod / 4f));
+            int best = 0; float bx0 = 0, by0 = 0; float bestDist = float.MaxValue;
+            for (int dy = -range; dy <= range; dy += step)
+            {
+                for (int dx = -range; dx <= range; dx += step)
+                {
+                    int score = AlignmentScore(dark, w, h, predX + dx, predY + dy, xAx, xAy, yAx, yAy);
+                    if (score < 0) continue;
+                    float d = dx * dx + dy * dy;
+                    if (score > best || (score == best && d < bestDist))
+                    { best = score; bx0 = predX + dx; by0 = predY + dy; bestDist = d; }
+                }
+            }
+            if (best < 17) return false; // coarse grid may straddle the optimum; refine below
+            int fine = best = 0; double sx = 0, sy = 0; int n = 0;
+            int r2 = step + 1;
+            for (int dy = -r2; dy <= r2; dy++)
+            {
+                for (int dx = -r2; dx <= r2; dx++)
+                {
+                    int score = AlignmentScore(dark, w, h, bx0 + dx, by0 + dy, xAx, xAy, yAx, yAy);
+                    if (score > fine) { fine = score; sx = bx0 + dx; sy = by0 + dy; n = 1; }
+                    else if (score == fine && score >= 0) { sx += bx0 + dx; sy += by0 + dy; n++; }
+                }
+            }
+            if (fine < 22) return false;
+            cx = (float)(sx / n); cy = (float)(sy / n);
+            return true;
+        }
+
+        // Cells of the 5x5 alignment template (center dark, ring 1 light, ring 2 dark)
+        // that match the binarized image when centered at (bx,by); -1 if off-frame.
+        private static int AlignmentScore(bool[,] dark, int w, int h, float bx, float by,
+            float xAx, float xAy, float yAx, float yAy)
+        {
+            int score = 0;
+            for (int j = -2; j <= 2; j++)
+            {
+                for (int i = -2; i <= 2; i++)
+                {
+                    int ix = (int)Math.Round(bx + i * xAx + j * yAx);
+                    int iy = (int)Math.Round(by + i * xAy + j * yAy);
+                    if (ix < 0 || iy < 0 || ix >= w || iy >= h) return -1;
+                    bool expectDark = Math.Max(Math.Abs(i), Math.Abs(j)) != 1;
+                    if (dark[iy, ix] == expectDark) score++;
+                }
+            }
+            return score;
+        }
+
+        // Homography from module coordinates (u,v) to pixels (x,y) through four point
+        // pairs: x = (a u + b v + c) / (g u + h v + 1), y = (d u + e v + f) / (g u + h v + 1).
+        // Returns {a,b,c,d,e,f,g,h}, or null if the points are degenerate.
+        private static double[] SolveHomography(double[] u, double[] v, double[] x, double[] y)
+        {
+            double[,] m = new double[8, 9];
+            for (int i = 0; i < 4; i++)
+            {
+                int r = i * 2;
+                m[r, 0] = u[i]; m[r, 1] = v[i]; m[r, 2] = 1; m[r, 6] = -u[i] * x[i]; m[r, 7] = -v[i] * x[i]; m[r, 8] = x[i];
+                m[r + 1, 3] = u[i]; m[r + 1, 4] = v[i]; m[r + 1, 5] = 1; m[r + 1, 6] = -u[i] * y[i]; m[r + 1, 7] = -v[i] * y[i]; m[r + 1, 8] = y[i];
+            }
+            for (int col = 0; col < 8; col++)
+            {
+                int piv = col;
+                for (int r = col + 1; r < 8; r++) if (Math.Abs(m[r, col]) > Math.Abs(m[piv, col])) piv = r;
+                if (Math.Abs(m[piv, col]) < 1e-12) return null;
+                if (piv != col)
+                    for (int k = 0; k < 9; k++) { double t = m[col, k]; m[col, k] = m[piv, k]; m[piv, k] = t; }
+                for (int r = 0; r < 8; r++)
+                {
+                    if (r == col) continue;
+                    double f = m[r, col] / m[col, col];
+                    if (f == 0) continue;
+                    for (int k = col; k < 9; k++) m[r, k] -= f * m[col, k];
+                }
+            }
+            double[] res = new double[8];
+            for (int i = 0; i < 8; i++) res[i] = m[i, 8] / m[i, i];
+            return res;
         }
 
         // A small window of plausible QR sizes (21, 25, 29, ... 177) around

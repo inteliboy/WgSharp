@@ -141,23 +141,48 @@ namespace WgSharp.Ui
                 DShow.IAMStreamConfig streamConfig = outPin as DShow.IAMStreamConfig;
                 if (streamConfig != null)
                 {
-                    DShow.AM_MEDIA_TYPE mt0 = null;
+                    DShow.AM_MEDIA_TYPE best = null;
+                    int bestIndex = -1;
+                    double bestScore = double.MaxValue;
                     int capCount = 0, capSize = 0;
                     streamConfig.GetNumberOfCapabilities(ref capCount, ref capSize);
                     IntPtr capBuf = capSize > 0 ? Marshal.AllocHGlobal(capSize) : IntPtr.Zero;
                     try
                     {
-                        if (capCount > 0)
+                        // Format index 0 is routinely a tiny (160x120 / 320x240) mode,
+                        // far too coarse to resolve a dense QR. Score every advertised
+                        // mode instead: closest to ~1280x720 wins (enough module
+                        // resolution without the USB-bandwidth frame-rate collapse of
+                        // uncompressed 1080p), with a penalty for slow (<15 fps) modes.
+                        for (int i = 0; i < capCount; i++)
                         {
-                            streamConfig.GetStreamCaps(0, ref mt0, capBuf);
-                            ThrowIfFailed(streamConfig.SetFormat(mt0), "IAMStreamConfig.SetFormat");
-                            L("Committed device's default stream format via IAMStreamConfig (format index 0).");
+                            DShow.AM_MEDIA_TYPE mt = null;
+                            try { streamConfig.GetStreamCaps(i, ref mt, capBuf); }
+                            catch (Exception) { continue; } // one unreadable mode must not abort selection
+                            if (mt == null) continue;
+                            double score = ScoreFormat(mt);
+                            if (score < bestScore)
+                            {
+                                if (best != null) DShow.DeleteMediaType(ref best);
+                                best = mt; bestIndex = i; bestScore = score;
+                            }
+                            else DShow.DeleteMediaType(ref mt);
+                        }
+                        if (best == null && capCount > 0)
+                        {
+                            bestIndex = 0;
+                            streamConfig.GetStreamCaps(0, ref best, capBuf);
+                        }
+                        if (best != null)
+                        {
+                            ThrowIfFailed(streamConfig.SetFormat(best), "IAMStreamConfig.SetFormat");
+                            L("Committed stream format index " + bestIndex + " of " + capCount + ": " + DescribeFormat(best) + ".");
                         }
                     }
                     finally
                     {
                         if (capBuf != IntPtr.Zero) Marshal.FreeHGlobal(capBuf);
-                        if (mt0 != null) DShow.DeleteMediaType(ref mt0);
+                        if (best != null) DShow.DeleteMediaType(ref best);
                     }
                 }
                 Marshal.ReleaseComObject(outPin);
@@ -215,39 +240,140 @@ namespace WgSharp.Ui
                 L("State transition was asynchronous (Run() returned S_FALSE); GetState(3000ms) -> " + state + " (2=Running).");
             }
             L("Graph running. Waiting for frames…");
+
+            // Re-assert after Run(): some drivers reset their 3A state when streaming starts.
+            EnableAutoCameraControls();
+        }
+
+        /// <summary>Steps exposure one notch (direction -1 = darker, +1 = brighter) and
+        /// leaves it in manual mode. Camera auto-exposure meters the whole scene, so a
+        /// small bright phone screen in a dim room saturates to a featureless white
+        /// rectangle; this lets the scan dialog correct that from the frame itself.
+        /// Exposure units are log2 seconds on UVC cameras (negative range) - one notch
+        /// is a halving/doubling - otherwise a linear value that is halved/doubled.
+        /// Returns false if the camera has no adjustable exposure.</summary>
+        public bool AdjustExposure(int direction)
+        {
+            try
+            {
+                DShow.IAMCameraControl cc = _sourceFilter as DShow.IAMCameraControl;
+                if (cc == null) return false;
+                int min, max, step, def, caps, cur, flags;
+                if (cc.GetRange(DShow.CameraControl_Exposure, out min, out max, out step, out def, out caps) != 0) return false;
+                if ((caps & DShow.Flags_Manual) == 0) return false;
+                if (cc.Get(DShow.CameraControl_Exposure, out cur, out flags) != 0) return false;
+                int next;
+                if (min < 0) next = cur + direction * Math.Max(1, step);
+                else next = direction < 0 ? cur / 2 : cur * 2;
+                next = Math.Max(min, Math.Min(max, next));
+                if (next == cur && (flags & DShow.Flags_Auto) == 0) return false;
+                int hr = cc.Set(DShow.CameraControl_Exposure, next, DShow.Flags_Manual);
+                L("Exposure " + cur + " -> " + next + " (manual, range " + min + ".." + max + ")" + (hr == 0 ? "." : ", Set() 0x" + hr.ToString("X8") + "."));
+                return hr == 0;
+            }
+            catch (Exception ex) { L("Exposure adjust skipped: " + ex.Message); return false; }
+        }
+
+        /// <summary>Scores a stream format (lower is better); see the selection comment in Start().</summary>
+        private static double ScoreFormat(DShow.AM_MEDIA_TYPE mt)
+        {
+            if (mt.FormatType != DShow.FORMAT_VideoInfo || mt.pbFormat == IntPtr.Zero ||
+                mt.cbFormat < (uint)Marshal.SizeOf(typeof(DShow.VIDEOINFOHEADER)))
+                return double.MaxValue / 2;
+            DShow.VIDEOINFOHEADER v = (DShow.VIDEOINFOHEADER)Marshal.PtrToStructure(mt.pbFormat, typeof(DShow.VIDEOINFOHEADER));
+            double area = (double)v.bmiHeader.biWidth * Math.Abs(v.bmiHeader.biHeight);
+            if (area < 320.0 * 240.0) return double.MaxValue / 2;
+            double score = Math.Abs(Math.Log(area / (1280.0 * 720.0)));
+            if (v.AvgTimePerFrame > 0 && v.AvgTimePerFrame > 10000000L / 15) score += 2.0;
+            return score;
+        }
+
+        private static string DescribeFormat(DShow.AM_MEDIA_TYPE mt)
+        {
+            if (mt.FormatType != DShow.FORMAT_VideoInfo || mt.pbFormat == IntPtr.Zero) return "(non-VideoInfo format)";
+            DShow.VIDEOINFOHEADER v = (DShow.VIDEOINFOHEADER)Marshal.PtrToStructure(mt.pbFormat, typeof(DShow.VIDEOINFOHEADER));
+            string fps = v.AvgTimePerFrame > 0 ? (10000000.0 / v.AvgTimePerFrame).ToString("0.#") + " fps" : "unknown fps";
+            return v.bmiHeader.biWidth + "x" + Math.Abs(v.bmiHeader.biHeight) + " @ " + fps;
+        }
+
+        /// <summary>Switches focus, exposure and white balance to the driver's automatic
+        /// mode. A DirectShow client inherits whatever state the last app left (often
+        /// manual focus / a fixed exposure), which is what other camera apps hide by
+        /// setting auto themselves. Every call is best-effort: cameras only expose the
+        /// controls they actually have.</summary>
+        private void EnableAutoCameraControls()
+        {
+            DShow.IAMCameraControl cc = _sourceFilter as DShow.IAMCameraControl;
+            if (cc != null)
+            {
+                SetAuto(cc, DShow.CameraControl_Focus, "focus");
+                SetAuto(cc, DShow.CameraControl_Exposure, "exposure");
+            }
+            else L("Camera has no IAMCameraControl (focus/exposure not adjustable).");
+
+            DShow.IAMVideoProcAmp pa = _sourceFilter as DShow.IAMVideoProcAmp;
+            if (pa != null) SetAuto(pa, DShow.VideoProcAmp_WhiteBalance, "white balance");
+        }
+
+        private void SetAuto(DShow.IAMCameraControl cc, int prop, string name)
+        {
+            try
+            {
+                int min, max, step, def, caps;
+                if (cc.GetRange(prop, out min, out max, out step, out def, out caps) != 0)
+                { L("Auto " + name + ": not supported by this camera."); return; }
+                if ((caps & DShow.Flags_Auto) == 0) { L("Auto " + name + ": camera has no automatic mode."); return; }
+                int hr = cc.Set(prop, def, DShow.Flags_Auto);
+                L("Auto " + name + (hr == 0 ? " enabled." : " Set() returned 0x" + hr.ToString("X8") + "."));
+            }
+            catch (Exception ex) { L("Auto " + name + " skipped: " + ex.Message); }
+        }
+
+        private void SetAuto(DShow.IAMVideoProcAmp pa, int prop, string name)
+        {
+            try
+            {
+                int min, max, step, def, caps;
+                if (pa.GetRange(prop, out min, out max, out step, out def, out caps) != 0)
+                { L("Auto " + name + ": not supported by this camera."); return; }
+                if ((caps & DShow.Flags_Auto) == 0) { L("Auto " + name + ": camera has no automatic mode."); return; }
+                int hr = pa.Set(prop, def, DShow.Flags_Auto);
+                L("Auto " + name + (hr == 0 ? " enabled." : " Set() returned 0x" + hr.ToString("X8") + "."));
+            }
+            catch (Exception ex) { L("Auto " + name + " skipped: " + ex.Message); }
         }
 
         public Bitmap GrabFrame()
         {
-            byte[] buf; int w, h, stride;
+            // Copy under the lock: the callback reuses one buffer (see BufferCB), so the
+            // bytes are only stable while the lock is held (~1ms for a 720p frame).
             lock (_frameLock)
             {
-                if (_latestFrame == null) return null;
-                buf = _latestFrame;
-                w = _frameWidth; h = _frameHeight; stride = _frameStride;
-            }
-            if (w <= 0 || h <= 0 || buf.Length < stride * h) return null;
+                byte[] buf = _latestFrame;
+                int w = _frameWidth, h = _frameHeight, stride = _frameStride;
+                if (buf == null || w <= 0 || h <= 0 || buf.Length < stride * h) return null;
 
-            try
-            {
-                var bmp = new Bitmap(w, h, PixelFormat.Format24bppRgb);
-                BitmapData bd = bmp.LockBits(new Rectangle(0, 0, w, h),
-                    ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
                 try
                 {
-                    // RGB24 from the Sample Grabber is a bottom-up DIB (row 0 = bottom of
-                    // image) - flip while copying.
-                    for (int y = 0; y < h; y++)
+                    var bmp = new Bitmap(w, h, PixelFormat.Format24bppRgb);
+                    BitmapData bd = bmp.LockBits(new Rectangle(0, 0, w, h),
+                        ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+                    try
                     {
-                        int srcRow = (h - 1 - y) * stride;
-                        IntPtr dst = (IntPtr)(bd.Scan0.ToInt64() + y * bd.Stride);
-                        Marshal.Copy(buf, srcRow, dst, Math.Min(stride, bd.Stride));
+                        // RGB24 from the Sample Grabber is a bottom-up DIB (row 0 = bottom of
+                        // image) - flip while copying.
+                        for (int y = 0; y < h; y++)
+                        {
+                            int srcRow = (h - 1 - y) * stride;
+                            IntPtr dst = (IntPtr)(bd.Scan0.ToInt64() + y * bd.Stride);
+                            Marshal.Copy(buf, srcRow, dst, Math.Min(stride, bd.Stride));
+                        }
                     }
+                    finally { bmp.UnlockBits(bd); }
+                    return bmp;
                 }
-                finally { bmp.UnlockBits(bd); }
-                return bmp;
+                catch { return null; }
             }
-            catch { return null; }
         }
 
         public void Dispose()
@@ -400,13 +526,14 @@ namespace WgSharp.Ui
                 try
                 {
                     if (pBuffer == IntPtr.Zero || bufferLen <= 0) return 0;
-                    byte[] buf = new byte[bufferLen];
-                    Marshal.Copy(pBuffer, buf, 0, bufferLen);
-
                     bool first;
                     lock (_owner._frameLock)
                     {
-                        _owner._latestFrame = buf;
+                        // One reused buffer: a fresh multi-MB array per frame at 30fps is
+                        // all large-object-heap garbage.
+                        if (_owner._latestFrame == null || _owner._latestFrame.Length != bufferLen)
+                            _owner._latestFrame = new byte[bufferLen];
+                        Marshal.Copy(pBuffer, _owner._latestFrame, 0, bufferLen);
                         _owner._frameSeq++;
                         first = _owner._frameSeq == 1;
                     }
@@ -578,6 +705,29 @@ namespace WgSharp.Ui
                 int GetFormat_Unused();
                 int GetNumberOfCapabilities(ref int piCount, ref int piSize);
                 int GetStreamCaps(int iIndex, [In, Out, MarshalAs(UnmanagedType.LPStruct)] ref AM_MEDIA_TYPE ppmt, IntPtr pSCC);
+            }
+
+            public const int CameraControl_Exposure = 4;
+            public const int CameraControl_Focus = 6;
+            public const int VideoProcAmp_WhiteBalance = 7;
+            public const int Flags_Manual = 2;
+            public const int Flags_Auto = 1; // CameraControl_Flags_Auto == VideoProcAmp_Flags_Auto
+
+            // Both interfaces: GetRange, Set, Get in that vtable order (checked against strmif.h).
+            [ComImport, Guid("C6E13370-30AC-11d0-A18C-00A0C9118956"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+            public interface IAMCameraControl
+            {
+                [PreserveSig] int GetRange(int prop, out int min, out int max, out int step, out int def, out int flags);
+                [PreserveSig] int Set(int prop, int value, int flags);
+                [PreserveSig] int Get(int prop, out int value, out int flags);
+            }
+
+            [ComImport, Guid("C6E13360-30AC-11d0-A18C-00A0C9118956"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+            public interface IAMVideoProcAmp
+            {
+                [PreserveSig] int GetRange(int prop, out int min, out int max, out int step, out int def, out int flags);
+                [PreserveSig] int Set(int prop, int value, int flags);
+                [PreserveSig] int Get(int prop, out int value, out int flags);
             }
 
             [ComImport, Guid("6B652FFF-11FE-4fce-92AD-0266B5D7C78F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]

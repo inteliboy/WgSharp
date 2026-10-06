@@ -76,7 +76,9 @@ namespace WgSharp.Ui
             val.TextAlign = ContentAlignment.TopLeft;
             val.Dock = DockStyle.Fill;
             val.Margin = new Padding(0, 4, 3, 2);
-            val.AutoSize = true;
+            val.AutoSize = false;
+            val.UseMnemonic = false;
+            WrapToRow(t, row, val, 21);
 
             t.Controls.Add(lbl, 0, row);
             t.Controls.Add(val, 1, row);
@@ -84,8 +86,8 @@ namespace WgSharp.Ui
         }
 
         /// <summary>
-        /// Like AddRow but for base64 keys: a normal-size, single-line label that
-        /// does not wrap. The detail pane is wide enough for a 44-char key to fit.
+        /// Like AddRow but for base64 keys: a monospace label that
+        /// that wraps if the pane is too narrow for a 44-char key.
         /// </summary>
         public static Label AddKeyRow(TableLayoutPanel t, string label, string value)
         {
@@ -97,24 +99,51 @@ namespace WgSharp.Ui
             lbl.Text = label + ":";
             lbl.Font = LabelFont;
             lbl.ForeColor = AppTheme.FieldLabel;
-            lbl.TextAlign = ContentAlignment.MiddleRight;
+            lbl.TextAlign = ContentAlignment.TopRight;
             lbl.Dock = DockStyle.Fill;
-            lbl.Margin = new Padding(3, 2, 6, 2);
+            lbl.Margin = new Padding(3, 4, 6, 2);
 
             var val = new Label();
             val.Text = value;
             val.Font = KeyFont;  // monospace, like the official key display
             val.ForeColor = AppTheme.FieldValue;
-            val.TextAlign = ContentAlignment.MiddleLeft;
+            val.TextAlign = ContentAlignment.TopLeft;
             val.Dock = DockStyle.Fill;
-            val.Margin = new Padding(0, 2, 3, 2);
-            val.AutoSize = false;                 // single line, no wrap
-            val.AutoEllipsis = true;              // if ever too narrow, ellipsize (don't wrap)
+            val.Margin = new Padding(0, 4, 3, 2);
+            val.AutoSize = false;
             val.UseMnemonic = false;
+            // One line when the pane is wide enough for the 44-char key; wraps onto a second
+            // line (rather than ellipsizing the end of a key off-screen) when it isn't.
+            WrapToRow(t, row, val, 21);
 
             t.Controls.Add(lbl, 0, row);
             t.Controls.Add(val, 1, row);
             return val;
+        }
+
+        /// <summary>
+        /// Keeps a fixed-size value label fully visible: the row grows to however many lines
+        /// the text needs at the label's current width (re-measured when the width or the
+        /// text changes), never below minHeight. Unbreakable text such as a base64 key is
+        /// broken at character level by WordBreak, so it wraps instead of being clipped.
+        /// </summary>
+        private static void WrapToRow(TableLayoutPanel t, int row, Label val, int minHeight)
+        {
+            EventHandler fit = delegate
+            {
+                if (val.Width <= 0 || row >= t.RowStyles.Count) return;
+                Size sz = TextRenderer.MeasureText(val.Text, val.Font, new Size(val.Width, int.MaxValue),
+                    TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.TextBoxControl);
+                int want = Math.Max(minHeight, sz.Height + val.Margin.Vertical + 2);
+                RowStyle rs = t.RowStyles[row];
+                if (rs.SizeType != SizeType.Absolute || (int)rs.Height != want)
+                {
+                    rs.SizeType = SizeType.Absolute;
+                    rs.Height = want;
+                }
+            };
+            val.SizeChanged += fit;
+            val.TextChanged += fit;
         }
 
         /// <summary>Wrap a long base64 key the way the official app does (it just wraps).</summary>
