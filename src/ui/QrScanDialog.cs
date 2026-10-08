@@ -53,11 +53,15 @@ namespace WgSharp.Ui
         // Server sitting underneath withholds the actual image data instead
         // of failing the call outright.
         private int _consecutiveBlankFrames;
-        // The timer now ticks ~every 150ms (fast, for a smooth preview). All
-        // thresholds below are in ticks at that interval.
-        private const int BlankFrameThreshold = 16;  // ~2.4s of solid-black frames before the privacy hint
-        private const int NoFrameTicksThreshold = 20; // ~3s with ZERO frames delivered -> same hint
-        private const int DecodeEveryTicks = 3;        // attempt a decode ~every 450ms; paint every tick
+        // The timer ticks every ~33ms (about 30 fps preview). Thresholds below
+        // are in ticks at that interval, except BlankFrameThreshold, which
+        // counts blank-check samples (one per BlankCheckEveryTicks).
+        private const int BlankFrameThreshold = 16;   // ~2.1s of solid-black frames before the privacy hint
+        private const int NoFrameTicksThreshold = 90;  // ~3s with ZERO frames delivered -> same hint
+        private const int BlankCheckEveryTicks = 4;    // blank check ~every 130ms
+        private const int DecodeEveryTicks = 6;        // start a background decode at most every ~200ms; paint every tick
+        private volatile bool _decoding;               // a background decode is in flight
+        private volatile bool _closed;
         private bool _privacyHintShown;
         private long _ticks;
         private long _lastDecodeTick;
@@ -152,11 +156,11 @@ namespace WgSharp.Ui
             Controls.Add(_btnCancel);
             CancelButton = _btnCancel;
 
-            _timer = new Timer { Interval = 150 };
+            _timer = new Timer { Interval = 33 };
             _timer.Tick += OnTimerTick;
 
             Load += OnLoad;
-            FormClosed += delegate { StopCamera(); };
+            FormClosed += delegate { _closed = true; StopCamera(); };
         }
 
         private void OnLoad(object sender, EventArgs e)
@@ -224,72 +228,98 @@ namespace WgSharp.Ui
                 Bitmap frame = _cam.GrabFrame();
                 if (frame == null) return;
 
-                // Always paint the latest frame as the live preview, replacing
-                // (and disposing) the previous one. This is what the user sees
-                // moving, independent of whether we attempt a decode this tick.
-                Image old = _preview.Image;
-                _preview.Image = (Bitmap)frame.Clone();
-                if (old != null) old.Dispose();
-
-                bool blank = IsLikelyBlank(frame);
-                if (blank)
+                // Always paint the latest frame as the live preview. The preview
+                // takes ownership of the bitmap (no clone); the decoder below
+                // gets its own copy.
+                bool checkBlank = (_ticks % BlankCheckEveryTicks) == 0;
+                // Between samples, carry over the last verdict.
+                bool blank = checkBlank ? IsLikelyBlank(frame) : _consecutiveBlankFrames > 0;
+                if (checkBlank)
                 {
-                    _consecutiveBlankFrames++;
-                    if (_consecutiveBlankFrames == BlankFrameThreshold && !_privacyHintShown)
+                    if (blank)
                     {
-                        _privacyHintShown = true;
-                        L("Frames arriving but consistently blank (" + _consecutiveBlankFrames +
-                          " in a row); showing privacy hint.");
-                        _status.Text = "The picture is staying black even though the camera connected. " +
-                            "This usually means Windows is blocking desktop apps from using the camera \u2014 " +
-                            "click below to check.";
-                        _btnPrivacy.Visible = true;
+                        _consecutiveBlankFrames++;
+                        if (_consecutiveBlankFrames == BlankFrameThreshold && !_privacyHintShown)
+                        {
+                            _privacyHintShown = true;
+                            L("Frames arriving but consistently blank (" + _consecutiveBlankFrames +
+                              " in a row); showing privacy hint.");
+                            _status.Text = "The picture is staying black even though the camera connected. " +
+                                "This usually means Windows is blocking desktop apps from using the camera — " +
+                                "click below to check.";
+                            _btnPrivacy.Visible = true;
+                        }
                     }
-                }
-                else
-                {
-                    // A real (non-blank) frame: clear any prior warning state.
-                    if (_consecutiveBlankFrames > 0 || _btnPrivacy.Visible)
+                    else
                     {
-                        _consecutiveBlankFrames = 0;
-                        _privacyHintShown = false;
-                        _btnPrivacy.Visible = false;
-                        _status.Text = "Point the camera at the QR code\u2026";
+                        // A real (non-blank) frame: clear any prior warning state.
+                        if (_consecutiveBlankFrames > 0 || _btnPrivacy.Visible)
+                        {
+                            _consecutiveBlankFrames = 0;
+                            _privacyHintShown = false;
+                            _btnPrivacy.Visible = false;
+                            _status.Text = "Point the camera at the QR code…";
+                        }
                     }
                 }
 
                 AdjustExposureFromFrame(frame);
 
-                // Decode is more expensive than a paint, so don't run it on
-                // every fast preview tick — roughly 2-3 times a second is
-                // plenty for a QR held up to the camera, and keeps the preview
-                // smooth. Skip it on a blank frame (nothing to find).
-                if (!blank && (_ticks - _lastDecodeTick) >= DecodeEveryTicks)
+                // Decoding is expensive, so it runs on a pool thread on its own
+                // copy of the frame; the UI thread only paints. One decode at a
+                // time, and none on a blank frame (nothing to find).
+                if (!blank && !_decoding && (_ticks - _lastDecodeTick) >= DecodeEveryTicks)
                 {
                     _lastDecodeTick = _ticks;
-                    string diag;
-                    string text = QrImageLocator.TryDecodeFrame(frame, out diag);
-                    if (text == null && diag != null)
-                    {
-                        if ((_failedDecodes++ % 10) == 0) L("Decode attempt on " + frame.Width + "x" + frame.Height + " frame failed: " + diag);
-                        _status.Text = "Looking for a QR code… (" + diag + ")";
-                    }
-                    if (text != null)
-                    {
-                        L("QR decoded from a webcam frame (" + text.Length + " chars).");
-                        DecodedText = text;
-                        _timer.Stop();
-                        frame.Dispose();
-                        DialogResult = DialogResult.OK;
-                        Close();
-                        return;
-                    }
+                    _decoding = true;
+                    Bitmap copy = (Bitmap)frame.Clone();
+                    int fw = frame.Width, fh = frame.Height;
+                    System.Threading.ThreadPool.QueueUserWorkItem(delegate { DecodeInBackground(copy, fw, fh); });
                 }
 
-                frame.Dispose();
+                Image old = _preview.Image;
+                _preview.Image = frame;
+                if (old != null) old.Dispose();
             }
             catch { /* a single bad frame is not fatal; just try again next tick */ }
             finally { _busy = false; }
+        }
+
+        private void DecodeInBackground(Bitmap copy, int fw, int fh)
+        {
+            string diag = null, text = null;
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                using (copy) text = QrImageLocator.TryDecodeFrame(copy, out diag);
+            }
+            catch { /* treat as a failed attempt */ }
+            long ms = sw.ElapsedMilliseconds;
+
+            try
+            {
+                if (_closed || !IsHandleCreated) { _decoding = false; return; }
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    _decoding = false;
+                    if (_closed || IsDisposed) return;
+                    if (text == null)
+                    {
+                        if (diag != null)
+                        {
+                            if ((_failedDecodes++ % 10) == 0) L("Decode attempt on " + fw + "x" + fh + " frame failed after " + ms + " ms: " + diag);
+                            _status.Text = "Looking for a QR code… (" + diag + ")";
+                        }
+                        return;
+                    }
+                    L("QR decoded from a webcam frame (" + text.Length + " chars, " + ms + " ms).");
+                    DecodedText = text;
+                    _timer.Stop();
+                    DialogResult = DialogResult.OK;
+                    Close();
+                });
+            }
+            catch { _decoding = false; }
         }
 
         /// <summary>
@@ -299,7 +329,7 @@ namespace WgSharp.Ui
         /// than every pixel — this only needs to be a cheap, reliable signal,
         /// not a precise measurement, and runs every 400ms.
         /// </summary>
-        private const int ExposureSettleTicks = 4; // ~0.6s between steps so the sensor settles
+        private const int ExposureSettleTicks = 18; // ~0.6s between steps so the sensor settles
         private long _lastExposureTick;
         private bool _exposureManual;
         private int _failedDecodes;

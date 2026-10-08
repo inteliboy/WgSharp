@@ -453,9 +453,19 @@ namespace WgSharp.Ui
             float avgModulePx = (tl[2] + tr[2] + bl[2]) / 3f;
             if (avgModulePx < 0.5f) yield break;
 
+            // The module size from the horizontal scans is biased by rotation (a horizontal
+            // run cuts a tilted pattern at an angle: up to ~41% too long at 45 degrees),
+            // which throws the version guess off by far more than SizeCandidates' window.
+            // Re-measure along the code's own axes, where the pattern is undistorted.
+            float modU, modV;
+            float acrossFallback = ((distTR + distBL) / 2f) / avgModulePx;
+            float across = acrossFallback;
+            if (MeasureAxisModules(dark, w, h, tl, tr, bl, out modU, out modV))
+                across = (distTR / modU + distBL / modV) / 2f;
+
             // Mean of both sides: under perspective one side is foreshortened, which would
             // bias the module count (and so the whole version guess) low.
-            foreach (int size in SizeCandidates((distTR + distBL) / 2f, avgModulePx))
+            foreach (int size in SizeCandidates(across, acrossFallback))
             {
                 int modulesPerSide = size - 7;
                 float xAxisX = dxTR / modulesPerSide, xAxisY = dyTR / modulesPerSide;
@@ -638,26 +648,75 @@ namespace WgSharp.Ui
             return res;
         }
 
+        // Module size in pixels measured along the code's own x and y axes, by walking a ray
+        // out of each finder's center: dark center to light ring at 1.5 modules, to the dark
+        // ring at 2.5, out to the finder's edge at 3.5. Averages the rays that read cleanly
+        // (tl along both axes, tr back along x, bl back along y); false if x or y has none.
+        private static bool MeasureAxisModules(bool[,] dark, int w, int h, float[] tl, float[] tr, float[] bl,
+            out float modU, out float modV)
+        {
+            modU = modV = 0;
+            float ux = tr[0] - tl[0], uy = tr[1] - tl[1], vx = bl[0] - tl[0], vy = bl[1] - tl[1];
+            float ul = (float)Math.Sqrt(ux * ux + uy * uy), vl = (float)Math.Sqrt(vx * vx + vy * vy);
+            ux /= ul; uy /= ul; vx /= vl; vy /= vl;
+            float a = MeasureRay(dark, w, h, tl[0], tl[1], ux, uy);
+            float b = MeasureRay(dark, w, h, tr[0], tr[1], -ux, -uy);
+            float c = MeasureRay(dark, w, h, tl[0], tl[1], vx, vy);
+            float d = MeasureRay(dark, w, h, bl[0], bl[1], -vx, -vy);
+            int nu = 0, nv = 0;
+            if (a > 0) { modU += a; nu++; }
+            if (b > 0) { modU += b; nu++; }
+            if (c > 0) { modV += c; nv++; }
+            if (d > 0) { modV += d; nv++; }
+            if (nu == 0 || nv == 0) return false;
+            modU /= nu; modV /= nv;
+            return true;
+        }
+
+        // Module size from one ray, or -1 if the run lengths don't look like a finder pattern.
+        private static float MeasureRay(bool[,] dark, int w, int h, float cx, float cy, float dx, float dy)
+        {
+            const float step = 0.25f;
+            float[] t = new float[3];
+            int found = 0;
+            bool cur = true; // the center is dark
+            for (float d = 0; found < 3; d += step)
+            {
+                if (d > 400f) return -1f;
+                int ix = (int)Math.Round(cx + dx * d), iy = (int)Math.Round(cy + dy * d);
+                if (ix < 0 || iy < 0 || ix >= w || iy >= h) return -1f;
+                if (dark[iy, ix] != cur) { t[found++] = d; cur = !cur; }
+            }
+            float m = t[2] / 3.5f;
+            if (m < 0.5f) return -1f;
+            if (Math.Abs(t[0] / 1.5f - m) > 0.35f * m || Math.Abs(t[1] / 2.5f - m) > 0.35f * m) return -1f;
+            return m;
+        }
+
         // A small window of plausible QR sizes (21, 25, 29, ... 177) around
         // the geometry's best estimate, instead of committing to a single
         // rounded guess - see SampleGrids' comment for why the single-guess
         // version was fragile under rotation. Tries the best guess first
         // (the common, unrotated/well-aligned case still resolves on the
         // first attempt), then its immediate smaller/larger neighbors.
-        private static IEnumerable<int> SizeCandidates(float distTR, float avgModulePx)
+        private static IEnumerable<int> SizeCandidates(float modulesAcross, float fallbackModulesAcross)
         {
-            float modulesAcross = distTR / avgModulePx; // ~= size - 7
-            int sizeGuess = (int)Math.Round(modulesAcross) + 7;
-            int kGuess = (int)Math.Round((sizeGuess - 17) / 4.0);
-
-            int[] offsets = { 0, -1, 1 };
             var seen = new HashSet<int>();
-            foreach (int off in offsets)
+            int[] offsets = { 0, -1, 1 };
+            // modulesAcross ~= size - 7. The axis-measured estimate first, then (only
+            // if it differs) the run-length one, in case the axis measurement misread.
+            float[] guesses = { modulesAcross, fallbackModulesAcross };
+            foreach (float g in guesses)
             {
-                int k = kGuess + off;
-                if (k < 1) k = 1;
-                if (k > 40) k = 40;
-                if (seen.Add(k)) yield return 17 + 4 * k;
+                int sizeGuess = (int)Math.Round(g) + 7;
+                int kGuess = (int)Math.Round((sizeGuess - 17) / 4.0);
+                foreach (int off in offsets)
+                {
+                    int k = kGuess + off;
+                    if (k < 1) k = 1;
+                    if (k > 40) k = 40;
+                    if (seen.Add(k)) yield return 17 + 4 * k;
+                }
             }
         }
     }
