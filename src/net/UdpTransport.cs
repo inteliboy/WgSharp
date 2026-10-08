@@ -134,33 +134,10 @@ namespace WgSharp.Net
             }
         }
 
-        /// <summary>
-        /// Receive one datagram and report its source endpoint (allocating
-        /// wrapper over the buffer overload). Returns null on timeout.
-        /// </summary>
-        public byte[] ReceiveFrom(out IPEndPoint from)
-        {
-            byte[] buf = new byte[65536];
-            int n = ReceiveFrom(buf, out from);
-            if (n < 0) return null;
-            byte[] exact = new byte[n];
-            Array.Copy(buf, exact, n);
-            return exact;
-        }
-
         /// <summary>Resolve a peer endpoint spec to an IPEndPoint (static helper).</summary>
         public static IPEndPoint ResolveEndpoint(string spec)
         {
             return Resolve(spec);
-        }
-
-        /// <summary>
-        /// Receive one datagram (allocating wrapper). Returns null on timeout.
-        /// </summary>
-        public byte[] Receive()
-        {
-            IPEndPoint from;
-            return ReceiveFrom(out from);
         }
 
         public void Dispose()

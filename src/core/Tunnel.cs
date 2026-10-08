@@ -557,6 +557,7 @@ namespace WgSharp.Core
             // transport message — so nothing on this path allocates per packet
             // except the final UDP message itself.
             byte[] rxBuf = new byte[65536];
+            byte[] txBuf = new byte[65536 + Messages.TransportHeaderSize + 16];
             while (_running)
             {
                 if (!_adapter.WaitForPacket(250)) continue;
@@ -564,13 +565,9 @@ namespace WgSharp.Core
                 long txThisDrain = 0;
                 while ((pktLen = _adapter.ReceivePacket(rxBuf)) > 0)
                 {
-                    IPAddress dest = AllowedIpRouter.DestinationOf(rxBuf, pktLen);
                     PeerState p = null;
-                    if (dest != null)
-                    {
-                        int idx = _router.Lookup(dest);
-                        if (idx >= 0 && idx < _peers.Count) p = _peers[idx];
-                    }
+                    int idx = _router.LookupPacket(rxBuf, pktLen);
+                    if (idx >= 0 && idx < _peers.Count) p = _peers[idx];
                     if (p == null && _peers.Count == 1) p = _peers[0];
                     if (p == null) continue;
 
@@ -578,9 +575,19 @@ namespace WgSharp.Core
                     if (s == null || p.Endpoint == null) continue;
                     try
                     {
-                        byte[] msg = s.Encrypt(rxBuf, 0, pktLen);
-                        if (_awg) msg = AwgFraming.WrapTransport(msg, _cfg.EffectiveH4);
-                        _udp.SendTo(msg, msg.Length, p.Endpoint);
+                        // Non-AWG: encrypt into the reused txBuf and send it
+                        // from there (SendTo is synchronous). AWG wraps into
+                        // its own exact-size array, so it keeps the allocating path.
+                        if (_awg)
+                        {
+                            byte[] msg = AwgFraming.WrapTransport(s.Encrypt(rxBuf, 0, pktLen), _cfg.EffectiveH4);
+                            _udp.SendTo(msg, msg.Length, p.Endpoint);
+                        }
+                        else
+                        {
+                            int msgLen = s.EncryptInto(rxBuf, 0, pktLen, txBuf);
+                            _udp.SendTo(txBuf, msgLen, p.Endpoint);
+                        }
                         p.LastSent = DateTime.UtcNow;
                         txThisDrain += pktLen;
                     }

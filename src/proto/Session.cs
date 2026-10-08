@@ -104,6 +104,19 @@ namespace WgSharp.Proto
         /// </summary>
         public byte[] Encrypt(byte[] plaintext, int offset, int length)
         {
+            byte[] msg = new byte[Messages.TransportHeaderSize + length + 16];
+            EncryptInto(plaintext, offset, length, msg);
+            return msg;
+        }
+
+        /// <summary>
+        /// Same as Encrypt but writes the transport message into a caller-owned
+        /// buffer (must hold at least TransportHeaderSize + length + 16 bytes)
+        /// and returns the message length, so the outbound loop can reuse one
+        /// buffer instead of allocating per packet.
+        /// </summary>
+        public int EncryptInto(byte[] plaintext, int offset, int length, byte[] msg)
+        {
             lock (_sendLock)
             {
                 // Hard stop at the message ceiling. Time-based rekey and the
@@ -119,8 +132,8 @@ namespace WgSharp.Proto
 
                 ChaCha20Poly1305.NonceFromCounterInto(counter, _sendNonce);
 
-                byte[] msg = new byte[Messages.TransportHeaderSize + length + 16];
                 msg[0] = Messages.TypeTransport;
+                msg[1] = 0; msg[2] = 0; msg[3] = 0; // reserved; buffer may be reused
                 Messages.WriteLE32(msg, Messages.Tr_Receiver, _remoteIndex);
                 Messages.WriteLE64(msg, Messages.Tr_Counter, counter);
 
@@ -129,7 +142,7 @@ namespace WgSharp.Proto
                 else
                     ChaCha20Poly1305.EncryptInto(_sendKey, _sendNonce, plaintext, offset, length,
                                                  EmptyAad, msg, Messages.Tr_Payload);
-                return msg;
+                return Messages.TransportHeaderSize + length + 16;
             }
         }
 

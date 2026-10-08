@@ -57,6 +57,37 @@ namespace WgSharp.Core
         }
 
         /// <summary>
+        /// Allocation-free equivalent of Lookup(DestinationOf(packet, length)):
+        /// matches the destination address in place inside the raw packet, so
+        /// the per-packet outbound path creates no byte[]/IPAddress garbage.
+        /// Returns -1 if the packet is not IPv4/IPv6 or nothing matches.
+        /// </summary>
+        public int LookupPacket(byte[] packet, int length)
+        {
+            if (packet == null || length < 20) return -1;
+            int version = packet[0] >> 4;
+            List<Entry> table;
+            int off, len;
+            if (version == 4) { table = _v4; off = 16; len = 4; }
+            else if (version == 6 && length >= 40) { table = _v6; off = 24; len = 16; }
+            else return -1;
+
+            int best = -1, bestPrefix = -1;
+            for (int i = 0; i < table.Count; i++)
+            {
+                Entry e = table[i];
+                if (e.Prefix <= bestPrefix) continue;
+                if (e.Network.Length != len) continue;
+                if (PrefixMatches(packet, off, e.Network, e.Prefix))
+                {
+                    bestPrefix = e.Prefix;
+                    best = e.PeerIndex;
+                }
+            }
+            return best;
+        }
+
+        /// <summary>
         /// Extract the destination IP from a raw IPv4/IPv6 packet, or null.
         /// </summary>
         public static IPAddress DestinationOf(byte[] packet, int length)
@@ -87,6 +118,20 @@ namespace WgSharp.Core
                 return new IPAddress(d);
             }
             return null;
+        }
+
+        private static bool PrefixMatches(byte[] ip, int ipOff, byte[] network, int prefixBits)
+        {
+            int fullBytes = prefixBits / 8;
+            int remBits = prefixBits % 8;
+            for (int i = 0; i < fullBytes; i++)
+                if (ip[ipOff + i] != network[i]) return false;
+            if (remBits > 0)
+            {
+                int mask = 0xFF << (8 - remBits) & 0xFF;
+                if ((ip[ipOff + fullBytes] & mask) != (network[fullBytes] & mask)) return false;
+            }
+            return true;
         }
 
         private static bool PrefixMatches(byte[] ip, byte[] network, int prefixBits)

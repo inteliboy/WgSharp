@@ -128,6 +128,7 @@ echo.
 echo === Building amd64 -^> bin\amd64\WgSharp.exe ===
 "%CSC%" /nologo /target:winexe /platform:x64 ^
     /langversion:5 ^
+    /optimize+ ^
     /define:TRACE ^
     /out:"bin\amd64\WgSharp.exe" ^
     /win32manifest:"app.manifest" ^

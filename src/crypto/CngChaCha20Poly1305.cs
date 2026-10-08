@@ -159,6 +159,10 @@ namespace WgSharp.Crypto
         //  Availability probe (called once at startup)                         //
         // ------------------------------------------------------------------ //
 
+        // Marshal.SizeOf is reflection-backed; compute once, not per packet.
+        private static readonly uint AuthInfoSize =
+            (uint)Marshal.SizeOf(typeof(BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO));
+
         private static readonly bool _available;
         private static readonly IntPtr _algHandle; // kept open for the process lifetime
 
@@ -241,7 +245,7 @@ namespace WgSharp.Crypto
                 Array.Clear(_tagBuffer, 0, TagSize);
 
                 var authInfo = new BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO();
-                authInfo.cbSize        = (uint)Marshal.SizeOf(authInfo);
+                authInfo.cbSize        = AuthInfoSize;
                 authInfo.dwInfoVersion = BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO_VERSION;
                 authInfo.pbNonce       = _noncePin.AddrOfPinnedObject();
                 authInfo.cbNonce       = NonceSize;
@@ -306,7 +310,7 @@ namespace WgSharp.Crypto
                 Array.Copy(input, inOff + ctLen, _tagBuffer, 0, TagSize);
 
                 var authInfo = new BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO();
-                authInfo.cbSize        = (uint)Marshal.SizeOf(authInfo);
+                authInfo.cbSize        = AuthInfoSize;
                 authInfo.dwInfoVersion = BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO_VERSION;
                 authInfo.pbNonce       = _noncePin.AddrOfPinnedObject();
                 authInfo.cbNonce      = NonceSize;
