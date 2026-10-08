@@ -384,3 +384,17 @@ Symptoms were a stuttering UI (worst while dragging the window), and idle CPU on
   Label/TableLayoutPanel handles on every rebuild (now disposed, wrapped in one Suspend/ResumeLayout).
 - **Verified**: compiles clean with the build.cmd csc flags. NOT yet exercised at runtime against a live
   service (LOG2 round trip, legacy-service fallback, drag smoothness); do that after installing.
+
+## CLI, diagnostics, auto-connect, tray status icon
+- **CLI** (`src/core/Cli.cs`, dispatched from `Program.Main` before the single-instance mutex): `--up/--down/--status/--list`
+  over the existing pipe (ACTIVATE/DEACTIVATE/STATUS); no new service commands. Output uses `AttachConsole(-1)`.
+  Not exercised against a live activation yet; `--list`/`--status` exit codes were checked.
+- **Diagnostics** (`src/core/ConnectionDiagnostics.cs`): state machine fed by `ApplyStatus`. Flags "handshaking >10s, no
+  reply" and "tx growing, rx flat for 20s". A stale handshake alone is NOT flagged (idle tunnels legitimately never
+  rekey). The **Test** button (built per `BuildDetail`) pings the first literal IP in the config's `DNS`.
+- **Auto-connect** (`src/core/NetworkRules.cs`, `MainForm.ApplyNetworkRule`): GUI-side, so it needs the window/tray process
+  running (service-side was deliberately not done). SSIDs via wlanapi.dll (struct offsets taken from the Win32 docs, not
+  yet verified on a machine with Wi-Fi). Settings: `AutoConnectEnabled/Tunnel`, `TrustedNetworks`, `WiredIsTrusted`;
+  tunnel picked via the tunnel list context menu. One attempt per network key; a manual disconnect sets
+  `_ruleSuppressed` until the network key changes. Disabled in portable mode.
+- **Tray icon states**: `UpdateTrayIcon` draws a status dot (green/amber/red) on the app icon; 4 cached variants.

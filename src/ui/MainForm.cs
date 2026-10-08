@@ -63,6 +63,11 @@ namespace WgSharp.Ui
         private Label _valListenPort, _valAddresses, _valDns, _valMtu, _valKeepalive;
         private Label _valPubKey, _valPeerPubKey;
         private Label _valAllowedIps, _valEndpoint, _valHandshake, _valTransfer;
+        private Label _valDiag;
+        private Button _btnTest;
+        private readonly ConnectionDiagnostics _diag = new ConnectionDiagnostics();
+        private DateTime _diagHoldUntil;   // keeps a ping result on screen instead of the per-tick hint
+        private bool _pingBusy;
 
         // Sibling overlay panels covering native TabControl chrome that
         // ignores BackColor under visual styles - see BuildTabOverlays().
@@ -262,6 +267,7 @@ namespace WgSharp.Ui
 
                 CheckForRunningServiceTunnel();  // detect an already-active service tunnel
                 MaybeAutoReconnect();            // reconnect if upgraded/restarted while connected
+                InitNetworkRules();              // auto-connect on untrusted networks (opt-in)
 
                 // Offer the one-time elevated setup if the constructor flagged
                 // that we're unelevated and the manager service wasn't
@@ -1041,6 +1047,21 @@ namespace WgSharp.Ui
             var toggleItem = new ToolStripMenuItem(isActiveTunnel ? "Disconnect" : "Connect");
             toggleItem.Click += new EventHandler(OnActivateToggle);
             menu.Items.Add(toggleItem);
+            var autoItem = new ToolStripMenuItem("Auto-connect on untrusted networks");
+            autoItem.Enabled = !AppSettings.PortableMode;
+            autoItem.Checked = string.Equals(AppSettings.AutoConnectTunnel, name, StringComparison.OrdinalIgnoreCase);
+            autoItem.Click += delegate
+            {
+                AppSettings.AutoConnectTunnel = autoItem.Checked ? "" : name;
+                AppSettings.Save();
+                _settingsPanel.UpdateAutoConnectTunnelLabel();
+                if (!autoItem.Checked && !AppSettings.AutoConnectEnabled)
+                    Log("Auto-connect tunnel set to " + name + ". Turn on \"Auto-connect on untrusted networks\" in Settings to use it.");
+                _ruleSuppressed = false;
+                _ruleMissingLogged = false;
+                ScheduleNetworkEval();
+            };
+            menu.Items.Add(autoItem);
             menu.Items.Add(new ToolStripSeparator());
             var removeItem = new ToolStripMenuItem("Remove");
             removeItem.Click += new EventHandler(OnDeleteClicked);
@@ -1263,11 +1284,14 @@ namespace WgSharp.Ui
             {
                 _valHandshake = FieldGrid.AddRow(gp, "Latest handshake", "\u2014");
                 _valTransfer = FieldGrid.AddRow(gp, "Transfer", "\u2014");
+                _valDiag = FieldGrid.AddRow(gp, "Diagnostics", "No problems detected");
+                _diag.Reset();
             }
             else
             {
                 _valHandshake = null;
                 _valTransfer = null;
+                _valDiag = null;
             }
             grpPeer.Controls.Add(gp);
 
@@ -1290,6 +1314,17 @@ namespace WgSharp.Ui
                 + 140 /* FieldGrid's label column width */;
             btnActivate.Location = new Point(valueColumnX, 7);
             actHost.Controls.Add(btnActivate); // re-parents it out of the old host
+            _btnTest = null;
+            if (showLive)
+            {
+                _btnTest = new Button();
+                _btnTest.Text = "Test";
+                _btnTest.Size = new Size(70, 26);
+                _btnTest.Location = new Point(valueColumnX + btnActivate.Width + 8, 7);
+                _btnTest.Click += OnTestConnection;
+                Ctrl.FlattenButton(_btnTest, false);
+                actHost.Controls.Add(_btnTest);
+            }
             _actHost = actHost;
 
             // Rebuild the top-docked stack: Peer, Activate strip, Interface (reverse add).
@@ -1310,6 +1345,40 @@ namespace WgSharp.Ui
             // Only now that btnActivate/btnEdit live under the new hosts is it
             // safe to dispose the old ones.
             foreach (Control c in stale) c.Dispose();
+        }
+
+        // Pings a host that is routed through the tunnel (the first literal DNS
+        // server in the config) and reports the result in the Diagnostics row
+        // and the Log. Off the UI thread: Ping.Send blocks for up to 2s per echo.
+        private void OnTestConnection(object sender, EventArgs e)
+        {
+            if (_pingBusy) return;
+            System.Net.IPAddress ip = ConnectionDiagnostics.PingTarget(_config);
+            if (ip == null)
+            {
+                ThemedMessageBox.Show(this,
+                    "Add a DNS server (an IP address) to this tunnel's [Interface] section to use as the ping target.",
+                    "Test connection", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            _pingBusy = true;
+            if (_valDiag != null) _valDiag.Text = "Pinging " + ip + "...";
+            _diagHoldUntil = DateTime.Now.AddSeconds(60);
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                string result = ConnectionDiagnostics.Ping(ip);
+                try
+                {
+                    BeginInvoke(new Action(delegate
+                    {
+                        _pingBusy = false;
+                        Log(result);
+                        if (_valDiag != null) _valDiag.Text = result;
+                        _diagHoldUntil = DateTime.Now.AddSeconds(15);
+                    }));
+                }
+                catch (Exception) { _pingBusy = false; }
+            });
         }
 
         private void PositionEditButton()
@@ -1358,6 +1427,55 @@ namespace WgSharp.Ui
             // on Windows; truncate defensively rather than let it silently fail.
             if (text.Length > 63) text = text.Substring(0, 60) + "...";
             if (notifyIcon.Text != text) notifyIcon.Text = text;
+            UpdateTrayIcon(state);
+        }
+
+        // Tray icon with a small status dot (green=connected, amber=negotiating,
+        // red=failed, none=inactive). Only four variants exist, so each is
+        // rendered once and cached for the life of the process (GetHicon
+        // handles are never freed, which is fine for a bounded cache).
+        private readonly Icon[] _trayIcons = new Icon[4];
+        private int _trayIconIndex;
+
+        private void UpdateTrayIcon(string state)
+        {
+            int idx;
+            if (string.IsNullOrEmpty(state) || state == "Idle") idx = 0;
+            else if (state == "Connected") idx = 1;
+            else if (state == "Failed") idx = 3;
+            else idx = 2;
+
+            if (idx == _trayIconIndex && _trayIcons[idx] != null) return;
+            if (_trayIcons[idx] == null)
+            {
+                try { _trayIcons[idx] = BuildTrayIcon(idx); }
+                catch (Exception) { return; }
+            }
+            _trayIconIndex = idx;
+            notifyIcon.Icon = _trayIcons[idx];
+        }
+
+        private Icon BuildTrayIcon(int idx)
+        {
+            if (idx == 0) return this.Icon;
+            Size sz = SystemInformation.SmallIconSize;
+            using (var bmp = new Bitmap(sz.Width, sz.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            {
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    g.Clear(Color.Transparent);
+                    using (var baseIcon = new Icon(this.Icon, sz)) g.DrawIcon(baseIcon, 0, 0);
+                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                    Color c = idx == 1 ? Color.FromArgb(0x4C, 0xAF, 0x50)
+                            : idx == 3 ? Color.FromArgb(0xD0, 0x4A, 0x4A)
+                            : Color.FromArgb(0xE0, 0xA3, 0x3C);
+                    int d = Math.Max(6, sz.Width * 10 / 16);
+                    var r = new Rectangle(sz.Width - d - 1, sz.Height - d - 1, d, d);
+                    using (var b = new SolidBrush(c)) g.FillEllipse(b, r);
+                    using (var pen = new Pen(Color.White, Math.Max(1f, sz.Width / 16f))) g.DrawEllipse(pen, r);
+                }
+                return Icon.FromHandle(bmp.GetHicon());
+            }
         }
 
         private void OnTrayIconDoubleClick(object sender, EventArgs e)
@@ -1446,7 +1564,10 @@ namespace WgSharp.Ui
 
             var disconnectItem = new ToolStripMenuItem("Disconnect");
             disconnectItem.Enabled = _active && !_busy; // nothing to disconnect, or already mid-operation
-            disconnectItem.Click += delegate { if (_active && !_busy) DeactivateTunnel(); };
+            disconnectItem.Click += delegate
+            {
+                if (_active && !_busy) { _ruleSuppressed = true; _ruleActivated = false; DeactivateTunnel(); }
+            };
             _trayMenu.Items.Add(disconnectItem);
 
             var exitItem = new ToolStripMenuItem("Exit");
@@ -1560,8 +1681,113 @@ namespace WgSharp.Ui
         {
             if (_busy) return;
             bool displayedIsActive = _active && _tunnelName == _activeTunnelName;
-            if (displayedIsActive) DeactivateTunnel();
+            if (displayedIsActive)
+            {
+                // The user chose to disconnect: stop the auto-connect rule from
+                // reconnecting on this same network.
+                _ruleSuppressed = true;
+                _ruleActivated = false;
+                DeactivateTunnel();
+            }
             else ActivateTunnel();
+        }
+
+        // ---------------- auto-connect on untrusted networks ----------------
+        // GUI-side: needs the window/tray process to be running. Debounced,
+        // since a single connect fires several address-change events.
+        private System.Windows.Forms.Timer _netTimer;
+        private string _lastNetKey;
+        private bool _ruleSuppressed;    // user disconnected manually; leave this network alone
+        private bool _ruleActivated;     // the current connection was started by the rule
+        private bool _netEvalBusy;
+        private bool _ruleMissingLogged;
+
+        private void InitNetworkRules()
+        {
+            if (_netTimer != null) return;
+            _netTimer = new System.Windows.Forms.Timer();
+            _netTimer.Interval = 3000;
+            _netTimer.Tick += delegate { _netTimer.Stop(); EvaluateNetworkRules(); };
+            System.Net.NetworkInformation.NetworkChange.NetworkAddressChanged += OnNetworkChanged;
+            System.Net.NetworkInformation.NetworkChange.NetworkAvailabilityChanged += OnNetworkAvailabilityChanged;
+            _settingsPanel.AutoConnectChanged += delegate
+            {
+                // Rules were edited: forget any manual override and re-evaluate.
+                _ruleSuppressed = false;
+                _ruleMissingLogged = false;
+                ScheduleNetworkEval();
+            };
+            ScheduleNetworkEval();
+        }
+
+        private void OnNetworkChanged(object sender, EventArgs e)
+        {
+            try { BeginInvoke(new Action(ScheduleNetworkEval)); } catch (Exception) { }
+        }
+
+        private void OnNetworkAvailabilityChanged(object sender, System.Net.NetworkInformation.NetworkAvailabilityEventArgs e)
+        {
+            try { BeginInvoke(new Action(ScheduleNetworkEval)); } catch (Exception) { }
+        }
+
+        private void ScheduleNetworkEval()
+        {
+            if (_netTimer == null) return;
+            _netTimer.Stop();
+            _netTimer.Start();
+        }
+
+        private void EvaluateNetworkRules()
+        {
+            if (!AppSettings.AutoConnectEnabled || AppSettings.PortableMode ||
+                string.IsNullOrEmpty(AppSettings.AutoConnectTunnel)) return;
+            if (_netEvalBusy) { ScheduleNetworkEval(); return; }
+            _netEvalBusy = true;
+            string trusted = AppSettings.TrustedNetworks;
+            bool wired = AppSettings.WiredIsTrusted;
+            ThreadPool.QueueUserWorkItem(delegate
+            {
+                NetworkRules.Result r = NetworkRules.Classify(trusted, wired);
+                try { BeginInvoke(new Action(delegate { _netEvalBusy = false; ApplyNetworkRule(r); })); }
+                catch (Exception) { _netEvalBusy = false; }
+            });
+        }
+
+        private void ApplyNetworkRule(NetworkRules.Result r)
+        {
+            if (!AppSettings.AutoConnectEnabled || AppSettings.PortableMode) return;
+            string name = AppSettings.AutoConnectTunnel;
+            if (string.IsNullOrEmpty(name)) return;
+
+            // A different network than last time (including going offline in
+            // between) clears any manual "leave me alone" override.
+            if (r.Key != _lastNetKey) { _lastNetKey = r.Key; _ruleSuppressed = false; }
+            if (r.Kind == NetworkRules.Kind.Offline) return;
+
+            if (_busy) { ScheduleNetworkEval(); return; }
+
+            if (r.Kind == NetworkRules.Kind.Untrusted)
+            {
+                if (_active || _ruleSuppressed) return;
+                int idx = lstTunnels.Items.IndexOf(name);
+                if (idx < 0 || !ConfigStore.Exists(name))
+                {
+                    if (!_ruleMissingLogged) { _ruleMissingLogged = true; Log("Auto-connect: tunnel \"" + name + "\" no longer exists."); }
+                    return;
+                }
+                Log("Auto-connect: untrusted network (" + r.Description + ") \u2014 connecting " + name + ".");
+                _ruleSuppressed = true;   // one attempt per network, so a failure can't loop
+                _ruleActivated = true;
+                lstTunnels.SelectedIndex = idx;
+                ActivateTunnel();
+            }
+            else if (_active && _ruleActivated &&
+                     string.Equals(_activeTunnelName, name, StringComparison.OrdinalIgnoreCase))
+            {
+                Log("Auto-connect: trusted network (" + r.Description + ") \u2014 disconnecting " + name + ".");
+                _ruleActivated = false;
+                DeactivateTunnel();
+            }
         }
 
         private void ActivateTunnel()
@@ -1962,6 +2188,12 @@ namespace WgSharp.Ui
             if (_valTransfer != null)
                 _valTransfer.Text = FormatBytes(s.RxBytes) + " received, " + FormatBytes(s.TxBytes) + " sent";
             if (_valEndpoint != null) _valEndpoint.Text = s.Endpoint;
+            if (_valDiag != null)
+            {
+                string hint = _diag.Update(s, DateTime.Now, _config != null && _config.IsAmneziaWg);
+                if (DateTime.Now >= _diagHoldUntil)
+                    _valDiag.Text = hint ?? "No problems detected";
+            }
 
             // Self-healing: if this was an auto-reconnect and we've been stuck
             // Negotiating for ~12 seconds, do one silent disconnect+reconnect.

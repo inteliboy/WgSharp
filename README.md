@@ -68,6 +68,9 @@ transport data path. A WinForms GUI. All compiled with `csc.exe` alone —
 | ✍️ **Config editor** | Syntax highlighting, a live-derived public key, and QR export. |
 | 📷 **Scan from QR code** | Add a tunnel by pointing the webcam at a QR code (or scanning a saved image) — a from-scratch QR decoder, no external library. |
 | 🔔 **Update notifications** | Quietly checks GitHub at startup for a newer release and shows a clickable tray notification if one exists; you can also check on demand from the **About** dialog or the tray menu. If the release has a Setup installer attached, one click downloads and installs it silently (no wizard) and restarts WgSharp; otherwise it opens the release page instead. Opt out of the startup check via **Settings → Check for updates**. |
+| 🩺 **Connection diagnostics** | The Tunnels tab shows a plain-language hint when a tunnel is up but not working (no handshake reply, or traffic sent with nothing coming back), and a **Test** button pings the tunnel's DNS server through the tunnel. |
+| 📶 **Auto-connect rules** | Optionally connects a chosen tunnel on any Wi-Fi network not in your trusted list (and disconnects on a trusted one). Pick the tunnel via right-click, set trusted SSIDs in **Settings**. |
+| ⌨️ **Command line** | `WgSharp.exe --up NAME`, `--down`, `--status`, `--list` control the background service over its pipe (see [Command line](#command-line)). |
 | 🧰 **System tray** | Live status tooltip, quick-connect menu, closing the window minimizes instead of exiting. |
 | ℹ️ **About dialog** | Version, GitHub link, Buy Me a Coffee support link, and a **Check for Updates** button — reachable from the window's system menu and the tray menu. |
 
@@ -583,6 +586,19 @@ first launch — values are copied to the registry and the old file is removed.
 - **Scan from QR code** (Add Tunnel menu) imports a tunnel by reading a QR
   code — either live via the webcam, or from a saved image. See
   [Scanning a QR code](#scanning-a-qr-code) for how it works and its limits.
+
+## Command line
+
+With the background service installed, the exe doubles as a small CLI that talks to the service over its named pipe (it works while the GUI is open):
+
+```
+WgSharp.exe --up <tunnel> [--no-wait]   activate a tunnel (waits up to 30s for Connected)
+WgSharp.exe --down                      deactivate the active tunnel
+WgSharp.exe --status                    print the active tunnel's state
+WgSharp.exe --list                      list saved tunnels
+```
+
+Exit codes: `0` ok, `1` failed, `2` usage, `3` service not running, `4` denied (control commands need an Administrator account), `5` timeout. `WgSharp.exe` is a GUI-subsystem program, so a console does not wait for it: use `start /wait WgSharp.exe --up Work` or `Start-Process -Wait -PassThru` to get the exit code. Portable-mode tunnels are not supported (they need a password).
 
 ## Scanning a QR code
 

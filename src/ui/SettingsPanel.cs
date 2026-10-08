@@ -20,6 +20,12 @@ namespace WgSharp.Ui
         private readonly CheckBox _debugLog;
         private readonly CheckBox _checkUpdates;
         private readonly CheckBox _darkTheme;
+        private readonly CheckBox _autoConnect;
+        private readonly CheckBox _wiredTrusted;
+        private readonly Label _lblAutoTunnel;
+        private readonly Label _lblTrusted;
+        private readonly TextBox _txtTrusted;
+        private readonly Panel _trustedBorder;
         // Descriptions now appear as hover tooltips (2-second delay) instead of
         // always-visible labels, leaving more room for the options themselves.
         private readonly ToolTip _tips;
@@ -27,6 +33,7 @@ namespace WgSharp.Ui
 
         public event Action PortableModeChanged;
         public event Action ThemeToggled;
+        public event Action AutoConnectChanged;
 
         public SettingsPanel()
         {
@@ -86,6 +93,34 @@ namespace WgSharp.Ui
                 "dark setting until you toggle this explicitly, after which your choice is remembered.");
             _darkTheme.CheckedChanged += OnDarkThemeChanged;
 
+            _autoConnect = MakeOption("Auto-connect on untrusted networks",
+                "Connects the chosen tunnel whenever you join a network that isn't trusted, and " +
+                "disconnects it again on a trusted one. Choose the tunnel by right-clicking it in the " +
+                "Tunnels tab. Needs the WgSharp window (or tray icon) to be running, and is not " +
+                "available in portable mode (a portable tunnel needs a password). Disconnecting " +
+                "manually pauses the rule until you change networks.");
+            _autoConnect.CheckedChanged += OnAutoConnectChanged;
+
+            _lblAutoTunnel = MakeSubLabel("");
+            _lblTrusted = MakeSubLabel("Trusted Wi-Fi networks (comma-separated names):");
+
+            _txtTrusted = new TextBox { Font = new Font("Segoe UI", 9.5F) };
+            Ctrl.ThemeEntry(_txtTrusted);
+            _txtTrusted.Leave += OnTrustedTextCommitted;
+            _txtTrusted.KeyDown += delegate (object s, KeyEventArgs e)
+            {
+                if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; OnTrustedTextCommitted(s, EventArgs.Empty); }
+            };
+            _trustedBorder = Ctrl.Bordered(_txtTrusted);
+            _trustedBorder.Size = new Size(420, 26);
+            _tips.SetToolTip(_txtTrusted, WrapTip("Wi-Fi network names (SSIDs) where you don't want the VPN, " +
+                "for example your home network. Matching ignores case."));
+
+            _wiredTrusted = MakeOption("Treat wired Ethernet as trusted",
+                "When on, a connected wired Ethernet adapter counts as a trusted network, so the " +
+                "tunnel is not auto-connected (and is auto-disconnected) while you're plugged in.");
+            _wiredTrusted.CheckedChanged += OnWiredTrustedChanged;
+
             // Lay the options out top to bottom in the order created above. A
             // single tight row height (no help label between them) is what
             // frees up the space; the description is a hover tooltip instead.
@@ -97,6 +132,71 @@ namespace WgSharp.Ui
                 options[i].Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
                 Controls.Add(options[i]);
             }
+
+            int y = top + options.Length * rowH;
+            _autoConnect.Location = new Point(leftPad, y);
+            _lblAutoTunnel.Location = new Point(leftPad + 24, y + 28);
+            _lblTrusted.Location = new Point(leftPad + 24, y + 52);
+            _trustedBorder.Location = new Point(leftPad + 24, y + 74);
+            _wiredTrusted.Location = new Point(leftPad, y + 108);
+            foreach (Control c in new Control[] { _autoConnect, _lblAutoTunnel, _lblTrusted, _trustedBorder, _wiredTrusted })
+                Controls.Add(c);
+        }
+
+        private static Label MakeSubLabel(string text)
+        {
+            return new Label
+            {
+                Text = text,
+                AutoSize = true,
+                UseMnemonic = false,
+                Font = new Font("Segoe UI", 9F),
+                ForeColor = AppTheme.FieldLabel,
+                BackColor = Color.Transparent
+            };
+        }
+
+        /// <summary>Shows which tunnel the auto-connect rule will use (set from the tunnel list's context menu).</summary>
+        public void UpdateAutoConnectTunnelLabel()
+        {
+            string t = AppSettings.AutoConnectTunnel;
+            _lblAutoTunnel.Text = string.IsNullOrEmpty(t)
+                ? "Tunnel: none selected (right-click a tunnel in the Tunnels tab)"
+                : "Tunnel: " + t;
+        }
+
+        private void OnAutoConnectChanged(object sender, EventArgs e)
+        {
+            if (_loading) return;
+            AppSettings.AutoConnectEnabled = _autoConnect.Checked;
+            AppSettings.Save();
+            if (_autoConnect.Checked && string.IsNullOrEmpty(AppSettings.AutoConnectTunnel))
+                ThemedMessageBox.Show(this,
+                    "Now right-click the tunnel you want to use in the Tunnels tab and choose " +
+                    "\"Auto-connect on untrusted networks\".",
+                    "WgSharp", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            var h = AutoConnectChanged;
+            if (h != null) h();
+        }
+
+        private void OnWiredTrustedChanged(object sender, EventArgs e)
+        {
+            if (_loading) return;
+            AppSettings.WiredIsTrusted = _wiredTrusted.Checked;
+            AppSettings.Save();
+            var h = AutoConnectChanged;
+            if (h != null) h();
+        }
+
+        private void OnTrustedTextCommitted(object sender, EventArgs e)
+        {
+            if (_loading) return;
+            string v = _txtTrusted.Text.Trim();
+            if (v == (AppSettings.TrustedNetworks ?? "")) return;
+            AppSettings.TrustedNetworks = v;
+            AppSettings.Save();
+            var h = AutoConnectChanged;
+            if (h != null) h();
         }
 
         // Builds a settings checkbox with a hover tooltip carrying its
@@ -152,6 +252,10 @@ namespace WgSharp.Ui
         public void RefreshTheme()
         {
             BackColor = AppTheme.PanelBg;
+            _lblAutoTunnel.ForeColor = AppTheme.FieldLabel;
+            _lblTrusted.ForeColor = AppTheme.FieldLabel;
+            Ctrl.ThemeEntry(_txtTrusted);
+            _trustedBorder.BackColor = AppTheme.Border;
             _loading = true;
             _darkTheme.Checked = AppTheme.IsDark;
             _loading = false;
@@ -174,6 +278,10 @@ namespace WgSharp.Ui
             _debugLog.Checked = AppSettings.DebugLog;
             _checkUpdates.Checked = AppSettings.CheckForUpdates;
             _darkTheme.Checked = AppTheme.IsDark;
+            _autoConnect.Checked = AppSettings.AutoConnectEnabled;
+            _wiredTrusted.Checked = AppSettings.WiredIsTrusted;
+            _txtTrusted.Text = AppSettings.TrustedNetworks ?? "";
+            UpdateAutoConnectTunnelLabel();
             UpdateExclusivityEnabled();
             _loading = false;
         }
@@ -188,6 +296,10 @@ namespace WgSharp.Ui
         private void UpdateExclusivityEnabled()
         {
             bool portable = AppSettings.PortableMode;
+            // Auto-connect needs an unattended activation; portable tunnels need a password.
+            _autoConnect.Enabled = !portable;
+            _wiredTrusted.Enabled = !portable;
+            _txtTrusted.Enabled = !portable;
 
             // Startup options in portable mode: a portable tunnel is
             // password-encrypted and there's no human at boot/login to type

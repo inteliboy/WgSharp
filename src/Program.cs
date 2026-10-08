@@ -94,6 +94,15 @@ namespace WgSharp
                 return;
             }
 
+            // Command-line control (--up/--down/--status/--list): talks to the
+            // service over the pipe and exits. Before the single-instance mutex
+            // so it works while the GUI is running.
+            if (WgSharp.Core.Cli.IsCliCommand(args))
+            {
+                Environment.ExitCode = WgSharp.Core.Cli.Run(args);
+                return;
+            }
+
             if (IsArchitectureMismatch())
             {
                 MessageBox.Show(

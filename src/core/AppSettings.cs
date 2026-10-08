@@ -40,6 +40,13 @@ namespace WgSharp.Core
         // follows the real OS theme instead of ThemeIsDark.
         public static bool ThemeIsDark;
         public static bool ThemeOverrideSet;
+        // Auto-connect rules: bring AutoConnectTunnel up on any network that
+        // isn't trusted (a Wi-Fi SSID in TrustedNetworks, or wired Ethernet when
+        // WiredIsTrusted), and take it down again on a trusted one.
+        public static bool AutoConnectEnabled;
+        public static string AutoConnectTunnel = "";
+        public static string TrustedNetworks = "";   // comma/semicolon separated SSIDs
+        public static bool WiredIsTrusted;
 
         private const string RegKey = @"Software\WgSharp";
 
@@ -137,6 +144,10 @@ namespace WgSharp.Core
                     TunnelOrder         = ReadString(k, "TunnelOrder", "");
                     ThemeIsDark         = ReadBool(k, "ThemeIsDark", false);
                     ThemeOverrideSet    = ReadBool(k, "ThemeOverrideSet", false);
+                    AutoConnectEnabled  = ReadBool(k, "AutoConnectEnabled", false);
+                    AutoConnectTunnel   = ReadString(k, "AutoConnectTunnel", "");
+                    TrustedNetworks     = ReadString(k, "TrustedNetworks", "");
+                    WiredIsTrusted      = ReadBool(k, "WiredIsTrusted", false);
                 }
             }
             catch { }
@@ -244,6 +255,14 @@ namespace WgSharp.Core
                         ThemeIsDark = ParseBool(val);
                     else if (key.Equals("ThemeOverrideSet", StringComparison.OrdinalIgnoreCase))
                         ThemeOverrideSet = ParseBool(val);
+                    else if (key.Equals("AutoConnectEnabled", StringComparison.OrdinalIgnoreCase))
+                        AutoConnectEnabled = ParseBool(val);
+                    else if (key.Equals("AutoConnectTunnel", StringComparison.OrdinalIgnoreCase))
+                        AutoConnectTunnel = val;
+                    else if (key.Equals("TrustedNetworks", StringComparison.OrdinalIgnoreCase))
+                        TrustedNetworks = val;
+                    else if (key.Equals("WiredIsTrusted", StringComparison.OrdinalIgnoreCase))
+                        WiredIsTrusted = ParseBool(val);
                 }
             }
             catch { }
@@ -276,6 +295,10 @@ namespace WgSharp.Core
                     k.SetValue("TunnelOrder",          TunnelOrder ?? "",            RegistryValueKind.String);
                     k.SetValue("ThemeIsDark",          ThemeIsDark          ? 1 : 0, RegistryValueKind.DWord);
                     k.SetValue("ThemeOverrideSet",     ThemeOverrideSet     ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("AutoConnectEnabled",   AutoConnectEnabled   ? 1 : 0, RegistryValueKind.DWord);
+                    k.SetValue("AutoConnectTunnel",    AutoConnectTunnel ?? "",      RegistryValueKind.String);
+                    k.SetValue("TrustedNetworks",      TrustedNetworks ?? "",        RegistryValueKind.String);
+                    k.SetValue("WiredIsTrusted",       WiredIsTrusted       ? 1 : 0, RegistryValueKind.DWord);
                     // PortableMode is NOT stored in the registry — if it's false
                     // (the normal case) we use the registry; if it's true we use
                     // the file. Storing false here would be redundant, and we never
@@ -300,9 +323,19 @@ namespace WgSharp.Core
                 sb.AppendLine("TunnelOrder=" + (TunnelOrder ?? ""));
                 sb.AppendLine("ThemeIsDark=" + (ThemeIsDark ? "true" : "false"));
                 sb.AppendLine("ThemeOverrideSet=" + (ThemeOverrideSet ? "true" : "false"));
+                sb.AppendLine("AutoConnectEnabled=" + (AutoConnectEnabled ? "true" : "false"));
+                sb.AppendLine("AutoConnectTunnel=" + (AutoConnectTunnel ?? ""));
+                sb.AppendLine("TrustedNetworks=" + NormalizeList(TrustedNetworks));
+                sb.AppendLine("WiredIsTrusted=" + (WiredIsTrusted ? "true" : "false"));
                 File.WriteAllText(FileSettingsPath, sb.ToString());
             }
             catch { }
+        }
+
+        // A multi-line value would corrupt the key=value file format.
+        private static string NormalizeList(string v)
+        {
+            return (v ?? "").Replace("\r", " ").Replace("\n", " ");
         }
 
         // ------------------------------------------------------------------ //
