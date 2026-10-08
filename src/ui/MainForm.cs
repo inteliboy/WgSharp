@@ -1345,7 +1345,14 @@ namespace WgSharp.Ui
             pnlDetail.Controls.Add(actHost);
             pnlDetail.Controls.Add(grpInterface);
             pnlDetail.Controls.Add(btnEdit);
-            btnEdit.BringToFront();
+            // Pin the z-order explicitly: dock layout runs from the highest index down, so this is
+            // what puts Interface on top. Relying on Add() order alone broke when the rebuild ran
+            // while the Tunnels tab was hidden (theme toggled from the Settings tab): the Activate
+            // strip then docked above Interface.
+            pnlDetail.Controls.SetChildIndex(btnEdit, 0);
+            pnlDetail.Controls.SetChildIndex(grpPeer, 1);
+            pnlDetail.Controls.SetChildIndex(actHost, 2);
+            pnlDetail.Controls.SetChildIndex(grpInterface, 3);
             PositionEditButton();
 
             UpdateActivateButton();
