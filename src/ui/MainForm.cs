@@ -94,6 +94,7 @@ namespace WgSharp.Ui
             InitializeComponent();
             BuildTabOverlays();
             SetupToolbarTooltips();
+            UpdateTrayIcon(null); // grey until a status update says otherwise
             ApplyTheme(); // also applies toolbar icons; calls BuildDetail() below redundantly but harmlessly
 
             // Host the live-stats panel in the Stats tab.
@@ -1430,52 +1431,68 @@ namespace WgSharp.Ui
             UpdateTrayIcon(state);
         }
 
-        // Tray icon with a small status dot (green=connected, amber=negotiating,
-        // red=failed, none=inactive). Only four variants exist, so each is
-        // rendered once and cached for the life of the process (GetHicon
-        // handles are never freed, which is fine for a bounded cache).
-        private readonly Icon[] _trayIcons = new Icon[4];
-        private int _trayIconIndex;
+        // Tray icon follows the state: grey when inactive/failed, flashing
+        // between grey and the regular icon while connecting/reconnecting,
+        // regular (orange) when connected. The grey variant is a pre-made
+        // multi-frame .ico (WgSharp-grey.ico, embedded by build.cmd as a
+        // managed resource), not rendered at runtime: drawing the PNG-compressed
+        // frames through Icon(Icon, Size)/ToBitmap hits the GDI+ bug described
+        // in AppIconLoader and comes out corrupted. Icon's stream constructor
+        // hands all frames to the OS, same as LoadFullEmbeddedIcon.
+        private Icon _trayGrey;
+        private int _trayMode = -1;        // 0 grey, 1 normal, 2 flashing
+        private bool _trayBlinkOn;
+        private System.Windows.Forms.Timer _trayBlinkTimer;
 
         private void UpdateTrayIcon(string state)
         {
-            int idx;
-            if (string.IsNullOrEmpty(state) || state == "Idle") idx = 0;
-            else if (state == "Connected") idx = 1;
-            else if (state == "Failed") idx = 3;
-            else idx = 2;
+            int mode;
+            if (string.IsNullOrEmpty(state) || state == "Idle" || state == "Failed") mode = 0;
+            else if (state == "Connected") mode = 1;
+            else mode = 2;
 
-            if (idx == _trayIconIndex && _trayIcons[idx] != null) return;
-            if (_trayIcons[idx] == null)
+            if (mode == _trayMode) return;
+            _trayMode = mode;
+
+            if (mode == 2)
             {
-                try { _trayIcons[idx] = BuildTrayIcon(idx); }
-                catch (Exception) { return; }
+                if (_trayBlinkTimer == null)
+                {
+                    _trayBlinkTimer = new System.Windows.Forms.Timer();
+                    _trayBlinkTimer.Interval = 500;
+                    _trayBlinkTimer.Tick += delegate
+                    {
+                        _trayBlinkOn = !_trayBlinkOn;
+                        SetTrayIcon(_trayBlinkOn);
+                    };
+                }
+                _trayBlinkOn = true;
+                SetTrayIcon(true);
+                _trayBlinkTimer.Start();
             }
-            _trayIconIndex = idx;
-            notifyIcon.Icon = _trayIcons[idx];
+            else
+            {
+                if (_trayBlinkTimer != null) _trayBlinkTimer.Stop();
+                SetTrayIcon(mode == 1);
+            }
         }
 
-        private Icon BuildTrayIcon(int idx)
+        private void SetTrayIcon(bool normal)
         {
-            if (idx == 0) return this.Icon;
-            Size sz = SystemInformation.SmallIconSize;
-            using (var bmp = new Bitmap(sz.Width, sz.Height, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            if (notifyIcon == null) return;
+            if (!normal && _trayGrey == null) _trayGrey = LoadGreyTrayIcon();
+            Icon icon = normal || _trayGrey == null ? this.Icon : _trayGrey;
+            if (notifyIcon.Icon != icon) notifyIcon.Icon = icon;
+        }
+
+        private static Icon LoadGreyTrayIcon()
+        {
+            try
             {
-                using (var g = Graphics.FromImage(bmp))
-                {
-                    g.Clear(Color.Transparent);
-                    using (var baseIcon = new Icon(this.Icon, sz)) g.DrawIcon(baseIcon, 0, 0);
-                    g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                    Color c = idx == 1 ? Color.FromArgb(0x4C, 0xAF, 0x50)
-                            : idx == 3 ? Color.FromArgb(0xD0, 0x4A, 0x4A)
-                            : Color.FromArgb(0xE0, 0xA3, 0x3C);
-                    int d = Math.Max(6, sz.Width * 10 / 16);
-                    var r = new Rectangle(sz.Width - d - 1, sz.Height - d - 1, d, d);
-                    using (var b = new SolidBrush(c)) g.FillEllipse(b, r);
-                    using (var pen = new Pen(Color.White, Math.Max(1f, sz.Width / 16f))) g.DrawEllipse(pen, r);
-                }
-                return Icon.FromHandle(bmp.GetHicon());
+                using (Stream s = typeof(MainForm).Assembly.GetManifestResourceStream("WgSharp.TrayGrey.ico"))
+                    return s == null ? null : new Icon(s);
             }
+            catch (Exception) { return null; }
         }
 
         private void OnTrayIconDoubleClick(object sender, EventArgs e)

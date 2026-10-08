@@ -397,4 +397,10 @@ Symptoms were a stuttering UI (worst while dragging the window), and idle CPU on
   yet verified on a machine with Wi-Fi). Settings: `AutoConnectEnabled/Tunnel`, `TrustedNetworks`, `WiredIsTrusted`;
   tunnel picked via the tunnel list context menu. One attempt per network key; a manual disconnect sets
   `_ruleSuppressed` until the network key changes. Disabled in portable mode.
-- **Tray icon states**: `UpdateTrayIcon` draws a status dot (green/amber/red) on the app icon; 4 cached variants.
+- **Tray icon states**: `UpdateTrayIcon` shows `WgSharp-grey.ico` when idle/failed (set in the constructor so an idle
+  launch starts grey), flashes grey/regular every 500ms while negotiating, and shows the regular icon when connected.
+  The grey icon is a pre-made multi-frame .ico (each PNG frame of `WgSharp.ico` converted to luma greyscale, alpha
+  kept), embedded by `build.cmd` as the managed resource `WgSharp.TrayGrey.ico` and loaded with `new Icon(stream)`.
+  Do NOT render tray variants at runtime via `new Icon(icon, size)`/`ToBitmap()`: with PNG-compressed frames that
+  path hits the GDI+ bug from `AppIconLoader` and produced visibly corrupted icons. Regenerate the grey .ico if
+  `WgSharp.ico` changes.

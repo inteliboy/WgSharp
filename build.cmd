@@ -132,6 +132,7 @@ echo === Building amd64 -^> bin\amd64\WgSharp.exe ===
     /out:"bin\amd64\WgSharp.exe" ^
     /win32manifest:"app.manifest" ^
     /win32icon:"WgSharp.ico" ^
+    /resource:"WgSharp-grey.ico",WgSharp.TrayGrey.ico ^
     %REFS% ^
     /recurse:src\core\*.cs /recurse:src\crypto\*.cs /recurse:src\proto\*.cs /recurse:src\net\*.cs /recurse:src\tun\*.cs /recurse:src\ui\*.cs /recurse:src\svc\*.cs ^
     "src\Program.cs"
