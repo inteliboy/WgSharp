@@ -71,7 +71,8 @@ namespace WgSharp.Ui
             MinimizeBox = false;
             ShowInTaskbar = false;
             Font = new Font("Segoe UI", 9F);
-            ClientSize = new Size(420, 462);
+            AutoScaleMode = AutoScaleMode.None; // layout is scaled by hand via Dpi.S
+            ClientSize = Dpi.Sz(420, 462);
             BackColor = AppTheme.WindowBg;
             HandleCreated += delegate
             {
@@ -85,8 +86,8 @@ namespace WgSharp.Ui
             // the live video feed, not app chrome.
             _previewHost = new Panel
             {
-                Location = new Point(16, 16),
-                Size = new Size(388, 320),
+                Location = Dpi.Pt(16, 16),
+                Size = Dpi.Sz(388, 320),
                 BackColor = Color.Black,
                 BorderStyle = BorderStyle.FixedSingle
             };
@@ -107,8 +108,8 @@ namespace WgSharp.Ui
             _status = new Label
             {
                 Text = "Starting the camera\u2026",
-                Location = new Point(16, 344),
-                Size = new Size(388, 50),
+                Location = Dpi.Pt(16, 344),
+                Size = Dpi.Sz(388, 50),
                 ForeColor = AppTheme.FieldValue
             };
 
@@ -119,8 +120,8 @@ namespace WgSharp.Ui
             _btnPrivacy = new Button
             {
                 Text = "Open camera privacy settings\u2026",
-                Location = new Point(16, 396),
-                Size = new Size(220, 28),
+                Location = Dpi.Pt(16, 396),
+                Size = Dpi.Sz(220, 28),
                 Visible = false
             };
             _btnPrivacy.Click += OnOpenPrivacySettings;
@@ -129,8 +130,8 @@ namespace WgSharp.Ui
             _btnFile = new Button
             {
                 Text = "Scan from image file\u2026",
-                Location = new Point(16, 428),
-                Size = new Size(180, 28)
+                Location = Dpi.Pt(16, 428),
+                Size = Dpi.Sz(180, 28)
             };
             _btnFile.Click += OnScanFromFile;
             Ctrl.FlattenButton(_btnFile, false);
@@ -139,8 +140,8 @@ namespace WgSharp.Ui
             {
                 Text = "Cancel",
                 DialogResult = DialogResult.Cancel,
-                Location = new Point(316, 428),
-                Size = new Size(88, 28)
+                Location = Dpi.Pt(316, 428),
+                Size = Dpi.Sz(88, 28)
             };
             Ctrl.FlattenButton(_btnCancel, false);
 

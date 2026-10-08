@@ -28,31 +28,31 @@ namespace WgSharp.Ui
             Dock = DockStyle.Fill;
             AutoScroll = true;
             BackColor = AppTheme.PanelBg;
-            Padding = new Padding(6);
+            Padding = Dpi.Pad(6);
 
             _downChart = new AreaChart();
             _downChart.Configure("Download rate", "B/s", Color.FromArgb(0x3A, 0x6E, 0xA5), 120, FmtRate);
-            _downChart.Location = new Point(8, 8);
-            _downChart.Size = new Size(440, 130);
+            _downChart.Location = Dpi.Pt(8, 8);
+            _downChart.Size = Dpi.Sz(440, 130);
             _downChart.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
             _upChart = new AreaChart();
             _upChart.Configure("Upload rate", "B/s", Color.FromArgb(0xC0, 0x5A, 0x3A), 120, FmtRate);
-            _upChart.Location = new Point(8, 148);
-            _upChart.Size = new Size(440, 130);
+            _upChart.Location = Dpi.Pt(8, 148);
+            _upChart.Size = Dpi.Sz(440, 130);
             _upChart.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
 
             _summaryGroup = new ThemedGroupBox();
             _summaryGroup.Text = "Summary";
-            _summaryGroup.Location = new Point(8, 290);
-            _summaryGroup.Size = new Size(420, 132);
+            _summaryGroup.Location = Dpi.Pt(8, 290);
+            _summaryGroup.Size = Dpi.Sz(420, 132);
 
             var grid = new TableLayoutPanel();
             grid.Dock = DockStyle.Fill;
             grid.ColumnCount = 2;
-            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
+            grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Dpi.S(150)));
             grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            grid.Padding = new Padding(6, 4, 6, 6);
+            grid.Padding = Dpi.Pad(6, 4, 6, 6);
 
             _lblDown = AddStat(grid, "Download");
             _lblUp = AddStat(grid, "Upload");
@@ -74,11 +74,11 @@ namespace WgSharp.Ui
         // but we also set their initial width here so the right gap to the
         // window matches the left gap (both = ChartMargin) instead of relying
         // on whatever the design-time width happened to be.
-        private const int ChartMargin = 8;
+        private static readonly int ChartMargin = Dpi.S(8);
         private void LayoutCharts()
         {
             int w = ClientSize.Width - ChartMargin * 2;
-            if (w < 60) w = 60;
+            if (w < Dpi.S(60)) w = Dpi.S(60);
             _downChart.Left = ChartMargin;
             _upChart.Left = ChartMargin;
             _downChart.Width = w;
@@ -95,7 +95,7 @@ namespace WgSharp.Ui
         {
             int row = t.RowCount;
             t.RowCount = row + 1;
-            t.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
+            t.RowStyles.Add(new RowStyle(SizeType.Absolute, Dpi.S(22)));
 
             var lbl = new Label();
             lbl.Text = label + ":";
@@ -103,7 +103,7 @@ namespace WgSharp.Ui
             lbl.ForeColor = AppTheme.FieldLabel;
             lbl.TextAlign = ContentAlignment.MiddleRight;
             lbl.Dock = DockStyle.Fill;
-            lbl.Margin = new Padding(3, 1, 6, 1);
+            lbl.Margin = Dpi.Pad(3, 1, 6, 1);
 
             var val = new Label();
             val.Text = "\u2014";
@@ -111,7 +111,7 @@ namespace WgSharp.Ui
             val.ForeColor = AppTheme.FieldValue;
             val.TextAlign = ContentAlignment.MiddleLeft;
             val.Dock = DockStyle.Fill;
-            val.Margin = new Padding(0, 1, 3, 1);
+            val.Margin = Dpi.Pad(0, 1, 3, 1);
 
             t.Controls.Add(lbl, 0, row);
             t.Controls.Add(val, 1, row);

@@ -12,7 +12,7 @@ namespace WgSharp.Ui
     // it at all. Ported as-is: a fully owner-drawn replacement instead.
     internal class ThemedCheckBox : CheckBox
     {
-        const int BoxSize = 14;
+        static readonly int BoxSize = Dpi.S(14);
 
         public ThemedCheckBox()
         {
@@ -47,23 +47,24 @@ namespace WgSharp.Ui
 
             if (Checked)
             {
-                using (Pen check = new Pen(AppTheme.AccentFg, 2f))
+                using (Pen check = new Pen(AppTheme.AccentFg, Math.Max(2f, BoxSize / 7f)))
                 {
                     check.StartCap = LineCap.Round;
                     check.EndCap = LineCap.Round;
-                    g.DrawLine(check, box.X + 3, box.Y + 7, box.X + 6, box.Y + 10);
-                    g.DrawLine(check, box.X + 6, box.Y + 10, box.X + 11, box.Y + 3);
+                    float k = BoxSize / 14f; // check path is authored on a 14px box
+                    g.DrawLine(check, box.X + 3 * k, box.Y + 7 * k, box.X + 6 * k, box.Y + 10 * k);
+                    g.DrawLine(check, box.X + 6 * k, box.Y + 10 * k, box.X + 11 * k, box.Y + 3 * k);
                 }
             }
 
-            Rectangle textRect = new Rectangle(BoxSize + 8, 0, Math.Max(0, Width - BoxSize - 8), Height);
+            Rectangle textRect = new Rectangle(BoxSize + Dpi.S(8), 0, Math.Max(0, Width - BoxSize - Dpi.S(8)), Height);
             Color fg = Enabled ? AppTheme.FieldValue : AppTheme.FieldLabel;
             TextRenderer.DrawText(g, Text, Font, textRect, fg,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
 
             if (Focused)
             {
-                Rectangle focusRect = new Rectangle(BoxSize + 6, 2, Math.Max(0, Width - BoxSize - 10), Height - 4);
+                Rectangle focusRect = new Rectangle(BoxSize + Dpi.S(6), Dpi.S(2), Math.Max(0, Width - BoxSize - Dpi.S(10)), Height - Dpi.S(4));
                 ControlPaint.DrawFocusRectangle(g, focusRect);
             }
         }
@@ -110,7 +111,7 @@ namespace WgSharp.Ui
                 Font f = Font;
                 if (!ReferenceEquals(f, _measuredFont) || _labelAreaHeight == 0)
                 {
-                    _labelAreaHeight = TextRenderer.MeasureText("Ag", f).Height + 6;
+                    _labelAreaHeight = TextRenderer.MeasureText("Ag", f).Height + Dpi.S(6);
                     _measuredFont = f;
                 }
                 return _labelAreaHeight;
@@ -136,7 +137,7 @@ namespace WgSharp.Ui
             if (!string.IsNullOrEmpty(Text))
                 TextRenderer.DrawText(g, Text, Font, new Point(0, 0), AppTheme.GroupText);
 
-            int lineY = LabelAreaHeight - 3;
+            int lineY = LabelAreaHeight - Dpi.S(3);
             using (Pen p = new Pen(AppTheme.Border)) g.DrawLine(p, 0, lineY, Math.Max(0, Width - 1), lineY);
         }
     }

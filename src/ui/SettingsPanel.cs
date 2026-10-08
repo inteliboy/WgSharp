@@ -39,7 +39,7 @@ namespace WgSharp.Ui
         {
             Dock = DockStyle.Fill;
             BackColor = AppTheme.PanelBg;
-            Padding = new Padding(10);
+            Padding = Dpi.Pad(10);
             AutoScroll = true;   // never clip the last item when the window is short
 
             // Order: portable, WireGuardNT, background service, GUI at login,
@@ -112,7 +112,9 @@ namespace WgSharp.Ui
                 if (e.KeyCode == Keys.Enter) { e.SuppressKeyPress = true; OnTrustedTextCommitted(s, EventArgs.Empty); }
             };
             _trustedBorder = Ctrl.Bordered(_txtTrusted);
-            _trustedBorder.Size = new Size(420, 26);
+            // A single-line TextBox is exactly PreferredHeight tall regardless of Dock,
+            // so size the 1px border around it rather than letting border color show below.
+            _trustedBorder.Size = new Size(Dpi.S(420), _txtTrusted.PreferredHeight + 2);
             _tips.SetToolTip(_txtTrusted, WrapTip("Wi-Fi network names (SSIDs) where you don't want the VPN, " +
                 "for example your home network. Matching ignores case."));
 
@@ -124,7 +126,7 @@ namespace WgSharp.Ui
             // Lay the options out top to bottom in the order created above. A
             // single tight row height (no help label between them) is what
             // frees up the space; the description is a hover tooltip instead.
-            const int leftPad = 16, top = 14, rowH = 34;
+            int leftPad = Dpi.S(16), top = Dpi.S(14), rowH = Dpi.S(34);
             CheckBox[] options = { _portable, _wgNt, _autoStart, _guiAutoStart, _checkUpdates, _debugLog, _darkTheme };
             for (int i = 0; i < options.Length; i++)
             {
@@ -135,10 +137,10 @@ namespace WgSharp.Ui
 
             int y = top + options.Length * rowH;
             _autoConnect.Location = new Point(leftPad, y);
-            _lblAutoTunnel.Location = new Point(leftPad + 24, y + 28);
-            _lblTrusted.Location = new Point(leftPad + 24, y + 52);
-            _trustedBorder.Location = new Point(leftPad + 24, y + 74);
-            _wiredTrusted.Location = new Point(leftPad, y + 108);
+            _lblAutoTunnel.Location = new Point(leftPad + Dpi.S(24), y + Dpi.S(28));
+            _lblTrusted.Location = new Point(leftPad + Dpi.S(24), y + Dpi.S(52));
+            _trustedBorder.Location = new Point(leftPad + Dpi.S(24), y + Dpi.S(74));
+            _wiredTrusted.Location = new Point(leftPad, y + Dpi.S(108));
             foreach (Control c in new Control[] { _autoConnect, _lblAutoTunnel, _lblTrusted, _trustedBorder, _wiredTrusted })
                 Controls.Add(c);
         }
@@ -207,7 +209,7 @@ namespace WgSharp.Ui
             var cb = new ThemedCheckBox
             {
                 Text = text,
-                Size = new Size(460, 24),
+                Size = Dpi.Sz(460, 24),
                 ForeColor = AppTheme.FieldValue,
                 Font = new Font("Segoe UI", 9.5F, FontStyle.Bold),
                 AutoSize = false

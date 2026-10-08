@@ -21,7 +21,7 @@ namespace WgSharp.Ui
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                      ControlStyles.OptimizedDoubleBuffer | ControlStyles.SupportsTransparentBackColor, true);
             BackColor = Color.Transparent;
-            Height = 18;
+            Height = Dpi.S(18);
         }
 
         public void Set(string text, Color color, bool active)
@@ -36,15 +36,20 @@ namespace WgSharp.Ui
             var g = e.Graphics;
             g.SmoothingMode = SmoothingMode.AntiAlias;
 
-            int y = (Height - 14) / 2;
+            int y = (Height - Dpi.S(14)) / 2;
             DrawShield(g, 0, y, _active, _color);
 
             using (var b = new SolidBrush(ForeColor))
-                g.DrawString(_text, Font, b, 20, (Height - Font.Height) / 2f);
+                g.DrawString(_text, Font, b, Dpi.S(20), (Height - Font.Height) / 2f);
         }
 
         internal static void DrawShield(Graphics g, int x, int y, bool active, Color color)
         {
+            // Authored on a 14x14 grid; scale via the Graphics transform.
+            GraphicsState saved = g.Save();
+            g.TranslateTransform(x, y);
+            g.ScaleTransform(Dpi.Scale, Dpi.Scale);
+            x = 0; y = 0;
             float w = 14, h = 14, cx = x + w / 2f;
             using (var path = new GraphicsPath())
             {
@@ -68,6 +73,7 @@ namespace WgSharp.Ui
                         });
                     }
             }
+            g.Restore(saved);
         }
     }
 }

@@ -31,7 +31,7 @@ namespace WgSharp.Ui
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
                      ControlStyles.OptimizedDoubleBuffer, true);
             _fmt = DefaultFormat;
-            Height = 120;
+            Height = Dpi.S(120);
         }
 
         public void Configure(string title, string unit, Color line, int capacity, Func<double, string> fmt)
@@ -74,11 +74,11 @@ namespace WgSharp.Ui
             // the right margin). Now we reserve a label gutter INSIDE that right
             // margin, between the plot's right border and the outer edge, so the
             // labels fit within the control and both gutters to the window match.
-            const int outerMargin = 8;      // gap from control edge to chart, both sides
-            const int labelGutter = 46;     // room for the y-axis scale text, inside the right margin
+            int outerMargin = Dpi.S(8);     // gap from control edge to chart, both sides
+            int labelGutter = Dpi.S(46);    // room for the y-axis scale text, inside the right margin
             int plotLeft = outerMargin;
             int plotRight = Width - outerMargin - labelGutter;
-            var plot = new Rectangle(plotLeft, 22, Math.Max(10, plotRight - plotLeft), Height - 58);
+            var plot = new Rectangle(plotLeft, Dpi.S(22), Math.Max(Dpi.S(10), plotRight - plotLeft), Height - Dpi.S(58));
 
             // Plot border (light box on all four sides).
             using (var p = new Pen(AppTheme.PlotBorder))
@@ -91,7 +91,7 @@ namespace WgSharp.Ui
 
             // title
             using (var tb = new SolidBrush(AppTheme.GroupText))
-                g.DrawString(_title, TitleFont, tb, plot.Left, 4);
+                g.DrawString(_title, TitleFont, tb, plot.Left, Dpi.S(4));
 
             double[] vals = _data.ToArray();
             double max = 1, mx = 0, avg = 0;
@@ -111,7 +111,7 @@ namespace WgSharp.Ui
                     int y = plot.Top + plot.Height * i / 4;
                     g.DrawLine(gp, plot.Left, y, plot.Right, y);
                     double gv = max * (4 - i) / 4.0;
-                    g.DrawString(_fmt(gv), ScaleFont, lb, plot.Right + 4, y - 6);
+                    g.DrawString(_fmt(gv), ScaleFont, lb, plot.Right + Dpi.S(4), y - Dpi.S(6));
                 }
             }
 
@@ -144,11 +144,11 @@ namespace WgSharp.Ui
 
             using (var sw = new SolidBrush(_line))
             {
-                int ly = plot.Bottom + 8;
-                g.FillRectangle(sw, plot.Left, ly + 2, 9, 9);
+                int ly = plot.Bottom + Dpi.S(8);
+                g.FillRectangle(sw, plot.Left, ly + Dpi.S(2), Dpi.S(9), Dpi.S(9));
                 using (var tb = new SolidBrush(AppTheme.FieldValue))
                     g.DrawString("Cur " + _fmt(cur) + "    Avg " + _fmt(avg) + "    Max " + _fmt(mx),
-                        LegendFont, tb, plot.Left + 14, ly);
+                        LegendFont, tb, plot.Left + Dpi.S(14), ly);
             }
         }
 

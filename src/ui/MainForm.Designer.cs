@@ -79,35 +79,35 @@ namespace WgSharp.Ui
             this.tabs.Controls.Add(this.tabLog);
             this.tabTunnels.Text = "Tunnels";
             this.tabTunnels.UseVisualStyleBackColor = true;
-            this.tabTunnels.Padding = new Padding(8);
+            this.tabTunnels.Padding = Dpi.Pad(8);
             this.tabStats.Text = "Stats";
             this.tabStats.UseVisualStyleBackColor = true;
-            this.tabStats.Padding = new Padding(8);
+            this.tabStats.Padding = Dpi.Pad(8);
             this.tabSettings.Text = "Settings";
             this.tabSettings.UseVisualStyleBackColor = true;
-            this.tabSettings.Padding = new Padding(8);
+            this.tabSettings.Padding = Dpi.Pad(8);
             this.tabLog.Text = "Log";
             this.tabLog.UseVisualStyleBackColor = true;
-            this.tabLog.Padding = new Padding(8);
+            this.tabLog.Padding = Dpi.Pad(8);
 
             // ---- split (list | detail) ----
             // Order matters: give the control a concrete size and set the min
             // sizes BEFORE SplitterDistance, otherwise WinForms throws
             // InvalidOperationException when the default tiny size can't satisfy
             // the distance + Panel2MinSize constraint (a silent-crash classic).
-            this.split.Size = new Size(760, 420);
-            this.split.Panel1MinSize = 110;
-            this.split.Panel2MinSize = 480;       // room for 44-char key + 140px label column
-            this.split.SplitterWidth = 6;
+            this.split.Size = Dpi.Sz(760, 420);
+            this.split.Panel1MinSize = Dpi.S(110);
+            this.split.Panel2MinSize = Dpi.S(480);       // room for 44-char key + 140px label column
+            this.split.SplitterWidth = Dpi.S(6);
             this.split.FixedPanel = FixedPanel.Panel1;
-            this.split.SplitterDistance = 226;    // fits all four toolbar buttons
+            this.split.SplitterDistance = Dpi.S(226);    // fits all four toolbar buttons
             this.split.Dock = DockStyle.Fill;
 
             // ---- left: tunnel list ----
             this.lstTunnels.Dock = DockStyle.Fill;
             this.lstTunnels.IntegralHeight = false;
             this.lstTunnels.DrawMode = DrawMode.OwnerDrawFixed;
-            this.lstTunnels.ItemHeight = 28;
+            this.lstTunnels.ItemHeight = Dpi.S(28);
             this.lstTunnels.Font = new Font("Segoe UI", 9.5F);
             this.lstTunnels.DrawItem += new DrawItemEventHandler(this.OnDrawTunnelItem);
             this.lstTunnels.SelectedIndexChanged += new System.EventHandler(this.OnTunnelSelected);
@@ -127,63 +127,63 @@ namespace WgSharp.Ui
 
             // ---- left bottom: action buttons ----
             this.pnlButtons.Dock = DockStyle.Bottom;
-            this.pnlButtons.Height = 38;
+            this.pnlButtons.Height = Dpi.S(38);
             // Four uniform icon-only buttons (Add Tunnel dropped its text -
             // matches Delete/Export/QR's own icon-only look instead of being
             // a different size/shape from the rest of the row), each a bit
             // bigger than the old 30x26, with a uniform 6px gap between all
             // four and vertically centered in the 38px-tall row.
             this.btnAddTunnel.Text = "";
-            this.btnAddTunnel.Location = new Point(0, 4);
-            this.btnAddTunnel.Size = new Size(34, 30);
+            this.btnAddTunnel.Location = Dpi.Pt(0, 4);
+            this.btnAddTunnel.Size = Dpi.Sz(34, 30);
             this.btnAddTunnel.UseVisualStyleBackColor = true;
             this.btnAddTunnel.Click += new System.EventHandler(this.OnAddTunnelClicked);
             this.btnDelete.Text = "";
-            this.btnDelete.Location = new Point(40, 4);
-            this.btnDelete.Size = new Size(34, 30);
+            this.btnDelete.Location = Dpi.Pt(40, 4);
+            this.btnDelete.Size = Dpi.Sz(34, 30);
             this.btnDelete.UseVisualStyleBackColor = true;
             this.btnDelete.Click += new System.EventHandler(this.OnDeleteClicked);
             this.btnExport.Text = "";
-            this.btnExport.Location = new Point(80, 4);
-            this.btnExport.Size = new Size(34, 30);
+            this.btnExport.Location = Dpi.Pt(80, 4);
+            this.btnExport.Size = Dpi.Sz(34, 30);
             this.btnExport.UseVisualStyleBackColor = true;
             this.btnExport.Click += new System.EventHandler(this.OnExportClicked);
             this.btnQr = new Button();
             this.btnQr.Text = "";
-            this.btnQr.Location = new Point(120, 4);
-            this.btnQr.Size = new Size(34, 30);
+            this.btnQr.Location = Dpi.Pt(120, 4);
+            this.btnQr.Size = Dpi.Sz(34, 30);
             this.btnQr.UseVisualStyleBackColor = true;
             this.btnQr.Click += new System.EventHandler(this.OnQrClicked);
 
             // ---- right: detail pane ----
             this.pnlDetail.Dock = DockStyle.Fill;
             this.pnlDetail.AutoScroll = true;
-            this.pnlDetail.Padding = new Padding(10, 6, 10, 6);
+            this.pnlDetail.Padding = Dpi.Pad(10, 6, 10, 6);
             this.pnlDetail.BackColor = Color.White;
 
             this.grpInterface.Text = "Interface";
             this.grpInterface.Dock = DockStyle.Top;
             this.grpInterface.AutoSize = true;
             this.grpInterface.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            this.grpInterface.Padding = new Padding(6, 4, 6, 8);
+            this.grpInterface.Padding = Dpi.Pad(6, 4, 6, 8);
             this.grpInterface.Font = new Font("Segoe UI", 9F);
 
             this.grpPeer.Text = "Peer";
             this.grpPeer.Dock = DockStyle.Top;
             this.grpPeer.AutoSize = true;
             this.grpPeer.AutoSizeMode = AutoSizeMode.GrowAndShrink;
-            this.grpPeer.Padding = new Padding(6, 4, 6, 8);
+            this.grpPeer.Padding = Dpi.Pad(6, 4, 6, 8);
             this.grpPeer.Font = new Font("Segoe UI", 9F);
 
             this.btnActivate.Text = "Activate";
-            this.btnActivate.Size = new Size(110, 28);
+            this.btnActivate.Size = Dpi.Sz(110, 28);
             this.btnActivate.Dock = DockStyle.Top;
             this.btnActivate.UseVisualStyleBackColor = true;
-            this.btnActivate.Margin = new Padding(0, 8, 0, 8);
+            this.btnActivate.Margin = Dpi.Pad(0, 8, 0, 8);
             this.btnActivate.Click += new System.EventHandler(this.OnActivateToggle);
 
             this.btnEdit.Text = "Edit";
-            this.btnEdit.Size = new Size(80, 26);
+            this.btnEdit.Size = Dpi.Sz(80, 26);
             this.btnEdit.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
             this.btnEdit.UseVisualStyleBackColor = true;
             this.btnEdit.Click += new System.EventHandler(this.OnEditClicked);
@@ -215,9 +215,9 @@ namespace WgSharp.Ui
             this.statusTimer.Tick += new System.EventHandler(this.OnStatusTick);
 
             // ---- form ----
-            this.AutoScaleMode = AutoScaleMode.Font;
-            this.ClientSize = new Size(760, 470);
-            this.MinimumSize = new Size(740, 420);
+            this.AutoScaleMode = AutoScaleMode.None; // layout is scaled by hand via Dpi.S
+            this.ClientSize = Dpi.Sz(760, 470);
+            this.MinimumSize = Dpi.Sz(740, 420);
             this.Controls.Add(this.tabs);
             this.Text = "WgSharp";
             // The .ico is embedded into WgSharp.exe itself via /win32icon at

@@ -23,7 +23,8 @@ namespace WgSharp.Ui
             MinimizeBox = false;
             ShowInTaskbar = false;
             Font = new Font("Segoe UI", 9F);
-            ClientSize = new Size(380, 130);
+            AutoScaleMode = AutoScaleMode.None; // layout is scaled by hand via Dpi.S
+            ClientSize = Dpi.Sz(380, 130);
             BackColor = AppTheme.WindowBg;
             HandleCreated += delegate
             {
@@ -36,23 +37,23 @@ namespace WgSharp.Ui
             var lbl = new Label
             {
                 Text = prompt,
-                Location = new Point(16, 14),
-                Size = new Size(348, 36),
+                Location = Dpi.Pt(16, 14),
+                Size = Dpi.Sz(348, 36),
                 AutoSize = false,
                 ForeColor = AppTheme.FieldValue
             };
 
             _value = new TextBox
             {
-                Location = new Point(16, 54),
-                Size = new Size(348, 24),
+                Location = Dpi.Pt(16, 54),
+                Size = Dpi.Sz(348, 24),
                 Text = defaultValue ?? ""
             };
             Ctrl.ThemeEntry(_value);
 
-            var ok = new Button { Text = "OK", DialogResult = DialogResult.None, Size = new Size(84, 28), Location = new Point(196, 90) };
+            var ok = new Button { Text = "OK", DialogResult = DialogResult.None, Size = Dpi.Sz(84, 28), Location = Dpi.Pt(196, 90) };
             Ctrl.FlattenButton(ok, true);
-            var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Size = new Size(84, 28), Location = new Point(284, 90) };
+            var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Size = Dpi.Sz(84, 28), Location = Dpi.Pt(284, 90) };
             Ctrl.FlattenButton(cancel, false);
 
             ok.Click += delegate

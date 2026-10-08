@@ -24,7 +24,8 @@ namespace WgSharp.Ui
             MinimizeBox = false;
             ShowInTaskbar = false;
             Font = new Font("Segoe UI", 9F);
-            ClientSize = new Size(380, confirm ? 168 : 130);
+            AutoScaleMode = AutoScaleMode.None; // layout is scaled by hand via Dpi.S
+            ClientSize = Dpi.Sz(380, confirm ? 168 : 130);
             BackColor = AppTheme.WindowBg;
             HandleCreated += delegate
             {
@@ -37,24 +38,24 @@ namespace WgSharp.Ui
             var lbl = new Label
             {
                 Text = prompt,
-                Location = new Point(16, 14),
-                Size = new Size(348, 36),
+                Location = Dpi.Pt(16, 14),
+                Size = Dpi.Sz(348, 36),
                 AutoSize = false,
                 ForeColor = AppTheme.FieldValue
             };
 
-            var lblPw = new Label { Text = "Password:", Location = new Point(16, 56), Size = new Size(90, 22), TextAlign = ContentAlignment.MiddleLeft, ForeColor = AppTheme.FieldLabel };
-            _pw = new TextBox { Location = new Point(110, 54), Size = new Size(254, 24), UseSystemPasswordChar = true };
+            var lblPw = new Label { Text = "Password:", Location = Dpi.Pt(16, 56), Size = Dpi.Sz(90, 22), TextAlign = ContentAlignment.MiddleLeft, ForeColor = AppTheme.FieldLabel };
+            _pw = new TextBox { Location = Dpi.Pt(110, 54), Size = Dpi.Sz(254, 24), UseSystemPasswordChar = true };
             Ctrl.ThemeEntry(_pw);
 
-            _confirm = new TextBox { Location = new Point(110, 84), Size = new Size(254, 24), UseSystemPasswordChar = true };
+            _confirm = new TextBox { Location = Dpi.Pt(110, 84), Size = Dpi.Sz(254, 24), UseSystemPasswordChar = true };
             Ctrl.ThemeEntry(_confirm);
-            var lblConfirm = new Label { Text = "Confirm:", Location = new Point(16, 86), Size = new Size(90, 22), TextAlign = ContentAlignment.MiddleLeft, ForeColor = AppTheme.FieldLabel };
+            var lblConfirm = new Label { Text = "Confirm:", Location = Dpi.Pt(16, 86), Size = Dpi.Sz(90, 22), TextAlign = ContentAlignment.MiddleLeft, ForeColor = AppTheme.FieldLabel };
 
             int btnY = confirm ? 124 : 90;
-            var ok = new Button { Text = "OK", DialogResult = DialogResult.None, Size = new Size(84, 28), Location = new Point(196, btnY) };
+            var ok = new Button { Text = "OK", DialogResult = DialogResult.None, Size = Dpi.Sz(84, 28), Location = Dpi.Pt(196, btnY) };
             Ctrl.FlattenButton(ok, true);
-            var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Size = new Size(84, 28), Location = new Point(284, btnY) };
+            var cancel = new Button { Text = "Cancel", DialogResult = DialogResult.Cancel, Size = Dpi.Sz(84, 28), Location = Dpi.Pt(284, btnY) };
             Ctrl.FlattenButton(cancel, false);
 
             ok.Click += delegate

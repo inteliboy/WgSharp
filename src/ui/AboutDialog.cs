@@ -24,7 +24,8 @@ namespace WgSharp.Ui
             MaximizeBox = false;
             MinimizeBox = false;
             ShowInTaskbar = false;
-            ClientSize = new Size(460, 420);
+            AutoScaleMode = AutoScaleMode.None; // layout is scaled by hand via Dpi.S
+            ClientSize = Dpi.Sz(460, 420);
             Font = new Font("Segoe UI", 9F);
             BackColor = AppTheme.WindowBg;
             HandleCreated += delegate
@@ -45,8 +46,8 @@ namespace WgSharp.Ui
             // PictureBox the already-correctly-sized result avoids that.
             var iconBox = new PictureBox
             {
-                Location = new Point(20, 18),
-                Size = new Size(64, 64),
+                Location = Dpi.Pt(20, 18),
+                Size = Dpi.Sz(64, 64),
                 SizeMode = PictureBoxSizeMode.Normal
             };
             try
@@ -77,8 +78,8 @@ namespace WgSharp.Ui
             {
                 Text = "WgSharp",
                 Font = new Font("Segoe UI Semibold", 15F, FontStyle.Bold),
-                Location = new Point(96, 18),
-                Size = new Size(340, 28),
+                Location = Dpi.Pt(96, 18),
+                Size = Dpi.Sz(340, 28),
                 TextAlign = ContentAlignment.MiddleLeft,
                 ForeColor = AppTheme.FieldValue
             };
@@ -86,16 +87,16 @@ namespace WgSharp.Ui
             var subtitle = new Label
             {
                 Text = "An independent, from-scratch WireGuard client for Windows.",
-                Location = new Point(96, 48),
-                Size = new Size(340, 32),
+                Location = Dpi.Pt(96, 48),
+                Size = Dpi.Sz(340, 32),
                 ForeColor = AppTheme.FieldLabel
             };
 
             // ---- version / architecture / OS / driver info ----
             var infoBox = new Label
             {
-                Location = new Point(20, 92),
-                Size = new Size(420, 110),
+                Location = Dpi.Pt(20, 92),
+                Size = Dpi.Sz(420, 110),
                 Font = new Font("Segoe UI", 8.5F),
                 ForeColor = AppTheme.FieldValue,
                 Text =
@@ -108,8 +109,8 @@ namespace WgSharp.Ui
 
             var credits = new Label
             {
-                Location = new Point(20, 210),
-                Size = new Size(420, 90),
+                Location = Dpi.Pt(20, 210),
+                Size = Dpi.Sz(420, 90),
                 Text =
                     "Uses the WireGuard protocol and the Wintun / WireGuardNT drivers,\n" +
                     "created by Jason A. Donenfeld. Their source is licensed under the\n" +
@@ -121,7 +122,7 @@ namespace WgSharp.Ui
             var copyright = new Label
             {
                 Text = "Copyright \u00A9 2026 inteliboy",
-                Location = new Point(20, 308),
+                Location = Dpi.Pt(20, 308),
                 AutoSize = true,
                 ForeColor = AppTheme.FieldLabel
             };
@@ -135,7 +136,7 @@ namespace WgSharp.Ui
             var link = new LinkLabel
             {
                 Text = "github.com/inteliboy/WgSharp",
-                Location = new Point(20 + copyrightW, 308),
+                Location = new Point(Dpi.S(20) + copyrightW, Dpi.S(308)),
                 AutoSize = true,
                 LinkColor = AppTheme.Accent,
                 ActiveLinkColor = AppTheme.AccentHover,
@@ -153,7 +154,7 @@ namespace WgSharp.Ui
             var coffeeLabel = new Label
             {
                 Text = "\u2665 Support this project:",
-                Location = new Point(20, 330),
+                Location = Dpi.Pt(20, 330),
                 AutoSize = true,
                 ForeColor = AppTheme.FieldLabel
             };
@@ -161,7 +162,7 @@ namespace WgSharp.Ui
             var coffeeLink = new LinkLabel
             {
                 Text = "buymeacoffee.com/inteliboy",
-                Location = new Point(20 + coffeeLabelW, 330),
+                Location = new Point(Dpi.S(20) + coffeeLabelW, Dpi.S(330)),
                 AutoSize = true,
                 LinkColor = AppTheme.Accent,
                 ActiveLinkColor = AppTheme.AccentHover,
@@ -177,16 +178,16 @@ namespace WgSharp.Ui
             {
                 Text = "Close",
                 DialogResult = DialogResult.OK,
-                Size = new Size(88, 28),
-                Location = new Point(ClientSize.Width - 108, ClientSize.Height - 40)
+                Size = Dpi.Sz(88, 28),
+                Location = new Point(ClientSize.Width - Dpi.S(108), ClientSize.Height - Dpi.S(40))
             };
             Ctrl.FlattenButton(btnClose, true);
 
             var btnCheckUpdates = new Button
             {
                 Text = "Check for Updates",
-                Size = new Size(140, 28),
-                Location = new Point(20, ClientSize.Height - 40)
+                Size = Dpi.Sz(140, 28),
+                Location = new Point(Dpi.S(20), ClientSize.Height - Dpi.S(40))
             };
             Ctrl.FlattenButton(btnCheckUpdates, false);
             btnCheckUpdates.Click += delegate { CheckForUpdatesInteractive(btnCheckUpdates); };

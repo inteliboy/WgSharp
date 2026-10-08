@@ -221,6 +221,7 @@ namespace WgSharp.Ui
             // Native ContextMenuStrip ignores app theme entirely unless given
             // an explicit Renderer - reads AppTheme.* live, no toggle bookkeeping needed.
             _trayMenu.Renderer = new ThemeMenuRenderer();
+            _trayMenu.ImageScalingSize = Dpi.Sz(16, 16); // shield bitmaps are rendered at DPI size
             _trayMenu.Opening += OnTrayMenuOpening;
             notifyIcon.ContextMenuStrip = _trayMenu;
             notifyIcon.BalloonTipClicked += OnUpdateBalloonClicked;
@@ -375,11 +376,11 @@ namespace WgSharp.Ui
             // uniform size), same code path for all four so the same Padding
             // fix below applies identically to every one of them.
             btnAddTunnel.Text = "";
-            btnAddTunnel.Image = Icons.Add(18);
+            btnAddTunnel.Image = Icons.Add(Dpi.S(18));
             btnAddTunnel.ImageAlign = ContentAlignment.MiddleCenter;
-            btnDelete.Image = Icons.Delete(18);
-            btnExport.Image = Icons.Export(18, AppTheme.FieldValue);
-            btnQr.Image = Icons.QrGlyph(18, AppTheme.FieldValue);
+            btnDelete.Image = Icons.Delete(Dpi.S(18));
+            btnExport.Image = Icons.Export(Dpi.S(18), AppTheme.FieldValue);
+            btnQr.Image = Icons.QrGlyph(Dpi.S(18), AppTheme.FieldValue);
 
             // Button's own MiddleCenter image layout consistently sits a couple
             // px low and right of true center on these flat buttons (measured
@@ -387,7 +388,7 @@ namespace WgSharp.Ui
             // regardless of its own glyph shape, so it's a layout quirk, not a
             // drawing one) - nudge the centering rectangle back with Padding
             // rather than shifting each icon's own pixels.
-            var iconPad = new Padding(0, 0, 2, 3);
+            var iconPad = Dpi.Pad(0, 0, 2, 3);
             btnAddTunnel.Padding = iconPad;
             btnDelete.Padding = iconPad;
             btnExport.Padding = iconPad;
@@ -889,11 +890,11 @@ namespace WgSharp.Ui
             bool itemActive = _active && name == _activeTunnelName;
 
             // shield glyph
-            int sx = e.Bounds.Left + 8, sy = e.Bounds.Top + (e.Bounds.Height - 16) / 2;
+            int sx = e.Bounds.Left + Dpi.S(8), sy = e.Bounds.Top + (e.Bounds.Height - Dpi.S(16)) / 2;
             DrawShield(e.Graphics, sx, sy, itemActive);
 
             using (var b = new SolidBrush(fore))
-                e.Graphics.DrawString(name, lstTunnels.Font, b, e.Bounds.Left + 32, e.Bounds.Top + 6);
+                e.Graphics.DrawString(name, lstTunnels.Font, b, e.Bounds.Left + Dpi.S(32), e.Bounds.Top + Dpi.S(6));
         }
 
         private static void DrawShield(Graphics g, int x, int y, bool active)
@@ -911,6 +912,12 @@ namespace WgSharp.Ui
         private static void DrawShield(Graphics g, int x, int y, Color fill, bool showCheck)
         {
             g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            // The glyph is authored on a 16x16 grid; scale it to the DPI via
+            // the Graphics transform (pen widths scale with it) and draw at 0,0.
+            System.Drawing.Drawing2D.GraphicsState saved = g.Save();
+            g.TranslateTransform(x, y);
+            g.ScaleTransform(Dpi.Scale, Dpi.Scale);
+            x = 0; y = 0;
             using (var path = new System.Drawing.Drawing2D.GraphicsPath())
             {
                 float w = 16, h = 16, cx = x + w / 2f;
@@ -935,6 +942,7 @@ namespace WgSharp.Ui
                         });
                     }
             }
+            g.Restore(saved);
         }
 
         // Renders a shield glyph to a standalone bitmap, sized for a context
@@ -942,7 +950,7 @@ namespace WgSharp.Ui
         // per-profile entries use this).
         private static Bitmap ShieldBitmap(Color fill, bool showCheck)
         {
-            var bmp = new Bitmap(16, 16);
+            var bmp = new Bitmap(Dpi.S(16), Dpi.S(16));
             using (var g = Graphics.FromImage(bmp))
             {
                 g.Clear(Color.Transparent);
@@ -1307,21 +1315,21 @@ namespace WgSharp.Ui
             // directly below the Interface fields' values.
             var actHost = new Panel();
             actHost.Dock = DockStyle.Top;
-            actHost.Height = 40;
+            actHost.Height = Dpi.S(40);
             actHost.BackColor = Color.Transparent;
             btnActivate.Dock = DockStyle.None;
-            btnActivate.Size = new Size(96, 26);
-            int valueColumnX = grpInterface.Padding.Left + 6 /* FieldGrid.Create()'s own Padding.Left */
-                + 140 /* FieldGrid's label column width */;
-            btnActivate.Location = new Point(valueColumnX, 7);
+            btnActivate.Size = Dpi.Sz(96, 26);
+            int valueColumnX = grpInterface.Padding.Left + Dpi.S(6) /* FieldGrid.Create()'s own Padding.Left */
+                + Dpi.S(140) /* FieldGrid's label column width */;
+            btnActivate.Location = new Point(valueColumnX, Dpi.S(7));
             actHost.Controls.Add(btnActivate); // re-parents it out of the old host
             _btnTest = null;
             if (showLive)
             {
                 _btnTest = new Button();
                 _btnTest.Text = "Test";
-                _btnTest.Size = new Size(70, 26);
-                _btnTest.Location = new Point(valueColumnX + btnActivate.Width + 8, 7);
+                _btnTest.Size = Dpi.Sz(70, 26);
+                _btnTest.Location = new Point(valueColumnX + btnActivate.Width + Dpi.S(8), Dpi.S(7));
                 _btnTest.Click += OnTestConnection;
                 Ctrl.FlattenButton(_btnTest, false);
                 actHost.Controls.Add(_btnTest);
@@ -1389,8 +1397,8 @@ namespace WgSharp.Ui
             // height=26 => 38-6-26=6px from its panel's bottom edge) so Edit
             // lines up with Add Tunnel/Delete/Export/QR on the other side of
             // the splitter instead of sitting a few pixels higher.
-            btnEdit.Location = new Point(pnlDetail.ClientSize.Width - btnEdit.Width - 16,
-                                         pnlDetail.ClientSize.Height - btnEdit.Height - 6);
+            btnEdit.Location = new Point(pnlDetail.ClientSize.Width - btnEdit.Width - Dpi.S(16),
+                                         pnlDetail.ClientSize.Height - btnEdit.Height - Dpi.S(6));
         }
 
         protected override void OnResize(EventArgs e)

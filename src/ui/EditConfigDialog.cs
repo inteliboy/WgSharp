@@ -28,8 +28,9 @@ namespace WgSharp.Ui
             StartPosition = FormStartPosition.CenterParent;
             MinimizeBox = false;
             MaximizeBox = false;
-            ClientSize = new Size(520, 470);
-            MinimumSize = new Size(420, 360);
+            AutoScaleMode = AutoScaleMode.None; // layout is scaled by hand via Dpi.S
+            ClientSize = Dpi.Sz(520, 470);
+            MinimumSize = Dpi.Sz(420, 360);
             Font = new Font("Segoe UI", 9F);
             BackColor = AppTheme.WindowBg;
             HandleCreated += delegate
@@ -43,16 +44,16 @@ namespace WgSharp.Ui
             var lblName = new Label
             {
                 Text = "Name:",
-                Location = new Point(14, 17),
-                Size = new Size(80, 20),
+                Location = Dpi.Pt(14, 17),
+                Size = Dpi.Sz(80, 20),
                 TextAlign = ContentAlignment.MiddleRight,
                 ForeColor = AppTheme.FieldLabel
             };
             _name = new TextBox
             {
                 Text = name,
-                Location = new Point(98, 14),
-                Size = new Size(408, 24),
+                Location = Dpi.Pt(98, 14),
+                Size = Dpi.Sz(408, 24),
                 Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right
             };
             Ctrl.ThemeEntry(_name);
@@ -60,16 +61,16 @@ namespace WgSharp.Ui
             var lblPub = new Label
             {
                 Text = "Public key:",
-                Location = new Point(14, 47),
-                Size = new Size(80, 20),
+                Location = Dpi.Pt(14, 47),
+                Size = Dpi.Sz(80, 20),
                 TextAlign = ContentAlignment.MiddleRight,
                 ForeColor = AppTheme.FieldLabel
             };
             _pubKeyValue = new Label
             {
                 Text = "(derived from PrivateKey)",
-                Location = new Point(98, 47),
-                Size = new Size(408, 20),
+                Location = Dpi.Pt(98, 47),
+                Size = Dpi.Sz(408, 20),
                 ForeColor = AppTheme.FieldLabel,
                 Font = new Font("Consolas", 8.5F),
                 AutoEllipsis = true,
@@ -82,8 +83,8 @@ namespace WgSharp.Ui
                 Font = new Font("Consolas", 10F),
                 BackColor = AppTheme.EntryBg,
                 ForeColor = AppTheme.EntryFg,
-                Location = new Point(14, 76),
-                Size = new Size(492, 312),
+                Location = Dpi.Pt(14, 76),
+                Size = Dpi.Sz(492, 312),
                 Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right,
                 BorderStyle = BorderStyle.None,
                 AcceptsTab = true,
@@ -92,8 +93,8 @@ namespace WgSharp.Ui
             };
             _config.TextChanged += new EventHandler(OnConfigChanged);
             Panel configBorder = Ctrl.Bordered(_config);
-            configBorder.Location = new Point(13, 75);
-            configBorder.Size = new Size(494, 314);
+            configBorder.Location = Dpi.Pt(13, 75);
+            configBorder.Size = Dpi.Sz(494, 314);
             configBorder.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
 
             _regularFont = new Font(_config.Font, FontStyle.Regular);
@@ -107,7 +108,7 @@ namespace WgSharp.Ui
             {
                 Text = "Save",
                 DialogResult = DialogResult.OK,
-                Size = new Size(88, 28),
+                Size = Dpi.Sz(88, 28),
                 Anchor = AnchorStyles.Bottom | AnchorStyles.Right
             };
             Ctrl.FlattenButton(btnSave, true);
@@ -115,18 +116,18 @@ namespace WgSharp.Ui
             {
                 Text = "Cancel",
                 DialogResult = DialogResult.Cancel,
-                Size = new Size(88, 28),
+                Size = Dpi.Sz(88, 28),
                 Anchor = AnchorStyles.Bottom | AnchorStyles.Right
             };
             Ctrl.FlattenButton(btnCancel, false);
-            btnSave.Location = new Point(ClientSize.Width - 2 * 94 - 14, ClientSize.Height - 38);
-            btnCancel.Location = new Point(ClientSize.Width - 94 - 8, ClientSize.Height - 38);
+            btnSave.Location = new Point(ClientSize.Width - Dpi.S(2 * 94 + 14), ClientSize.Height - Dpi.S(38));
+            btnCancel.Location = new Point(ClientSize.Width - Dpi.S(94 + 8), ClientSize.Height - Dpi.S(38));
 
             _blockUntunneled = new ThemedCheckBox
             {
                 Text = "Block untunneled traffic (kill-switch)",
-                Location = new Point(14, ClientSize.Height - 34),
-                Size = new Size(280, 22),
+                Location = new Point(Dpi.S(14), ClientSize.Height - Dpi.S(34)),
+                Size = Dpi.Sz(280, 22),
                 Anchor = AnchorStyles.Bottom | AnchorStyles.Left
             };
 

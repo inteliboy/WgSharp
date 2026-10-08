@@ -41,11 +41,11 @@ namespace WgSharp.Ui
                     PictureBox pic = new PictureBox();
                     pic.Image = sysIcon.ToBitmap();
                     pic.SizeMode = PictureBoxSizeMode.AutoSize;
-                    pic.Location = new Point(20, 20);
+                    pic.Location = Dpi.Pt(20, 20);
                     f.Controls.Add(pic);
                     picBottom = pic.Bottom;
                 }
-                int textLeft = sysIcon != null ? 66 : 20;
+                int textLeft = sysIcon != null ? Dpi.S(66) : Dpi.S(20);
 
                 Label lbl = new Label();
                 lbl.Text = text;
@@ -53,22 +53,22 @@ namespace WgSharp.Ui
                 lbl.ForeColor = AppTheme.FieldValue;
                 lbl.BackColor = Color.Transparent;
                 lbl.AutoSize = true;
-                lbl.MaximumSize = new Size(360, 0);
-                lbl.Location = new Point(textLeft, 22);
+                lbl.MaximumSize = new Size(Dpi.S(360), 0);
+                lbl.Location = new Point(textLeft, Dpi.S(22));
                 f.Controls.Add(lbl);
 
-                int contentBottom = Math.Max(lbl.Bottom, picBottom) + 24;
-                int clientWidth = Math.Max(360, textLeft + lbl.Width + 20);
+                int contentBottom = Math.Max(lbl.Bottom, picBottom) + Dpi.S(24);
+                int clientWidth = Math.Max(Dpi.S(360), textLeft + lbl.Width + Dpi.S(20));
 
                 string[] labels; DialogResult[] results;
                 ButtonSpecsFor(buttons, out labels, out results);
 
-                int btnH = 30, gap = 10, btnBottomMargin = 16;
+                int btnH = Dpi.S(30), gap = Dpi.S(10), btnBottomMargin = Dpi.S(16);
                 Font btnFont = f.Font;
 
                 int uniformBtnW = 0;
                 for (int i = 0; i < labels.Length; i++)
-                    uniformBtnW = Math.Max(uniformBtnW, TextRenderer.MeasureText(labels[i], btnFont).Width + 30);
+                    uniformBtnW = Math.Max(uniformBtnW, TextRenderer.MeasureText(labels[i], btnFont).Width + Dpi.S(30));
 
                 Button[] btns = new Button[labels.Length];
                 for (int i = 0; i < labels.Length; i++)
@@ -100,7 +100,7 @@ namespace WgSharp.Ui
                 }
                 int totalBtnW = (uniformBtnW + gap) * labels.Length - gap;
 
-                clientWidth = Math.Max(clientWidth, totalBtnW + 40);
+                clientWidth = Math.Max(clientWidth, totalBtnW + Dpi.S(40));
                 int x = (clientWidth - totalBtnW) / 2;
                 foreach (Button b in btns)
                 {

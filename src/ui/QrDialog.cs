@@ -29,7 +29,8 @@ namespace WgSharp.Ui
             MaximizeBox = false;
             MinimizeBox = false;
             ShowInTaskbar = false;
-            ClientSize = new Size(360, 436);
+            AutoScaleMode = AutoScaleMode.None; // layout is scaled by hand via Dpi.S
+            ClientSize = Dpi.Sz(360, 436);
             // Content area stays white intentionally regardless of app theme -
             // a QR code needs a white quiet zone to scan reliably. Only the
             // window chrome (title bar) follows the theme.
@@ -44,8 +45,8 @@ namespace WgSharp.Ui
 
             var pic = new PictureBox
             {
-                Location = new Point(20, 20),
-                Size = new Size(320, 320),
+                Location = Dpi.Pt(20, 20),
+                Size = Dpi.Sz(320, 320),
                 SizeMode = PictureBoxSizeMode.Zoom,
                 Image = Render(320),
                 BackColor = Color.White
@@ -54,8 +55,8 @@ namespace WgSharp.Ui
             var hint = new Label
             {
                 Text = "Scan with the WireGuard app, then name the tunnel on your phone.",
-                Location = new Point(20, 346),
-                Size = new Size(320, 40),     // two lines so the full sentence shows
+                Location = Dpi.Pt(20, 346),
+                Size = Dpi.Sz(320, 40),     // two lines so the full sentence shows
                 TextAlign = ContentAlignment.MiddleCenter,
                 ForeColor = Color.FromArgb(0x55, 0x55, 0x55)
             };
@@ -63,8 +64,8 @@ namespace WgSharp.Ui
             var btnSave = new Button
             {
                 Text = "Save PNG\u2026",
-                Location = new Point(20, 394),
-                Size = new Size(100, 28)
+                Location = Dpi.Pt(20, 394),
+                Size = Dpi.Sz(100, 28)
             };
             btnSave.Click += OnSave;
 
@@ -72,8 +73,8 @@ namespace WgSharp.Ui
             {
                 Text = "Close",
                 DialogResult = DialogResult.OK,
-                Location = new Point(240, 394),
-                Size = new Size(100, 28)
+                Location = Dpi.Pt(240, 394),
+                Size = Dpi.Sz(100, 28)
             };
 
             Controls.Add(pic);

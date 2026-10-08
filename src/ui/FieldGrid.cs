@@ -20,7 +20,7 @@ namespace WgSharp.Ui
         {
             int row = t.RowCount;
             t.RowCount = row + 1;
-            t.RowStyles.Add(new RowStyle(SizeType.Absolute, 22));
+            t.RowStyles.Add(new RowStyle(SizeType.Absolute, Dpi.S(22)));
 
             var lbl = new Label();
             lbl.Text = label + ":";
@@ -28,11 +28,11 @@ namespace WgSharp.Ui
             lbl.ForeColor = AppTheme.FieldLabel;
             lbl.TextAlign = ContentAlignment.MiddleRight;
             lbl.Dock = DockStyle.Fill;
-            lbl.Margin = new Padding(3, 2, 6, 2);
+            lbl.Margin = Dpi.Pad(3, 2, 6, 2);
 
             valueControl.ForeColor = AppTheme.FieldValue;
             valueControl.Dock = DockStyle.Fill;
-            valueControl.Margin = new Padding(0, 2, 3, 2);
+            valueControl.Margin = Dpi.Pad(0, 2, 3, 2);
 
             t.Controls.Add(lbl, 0, row);
             t.Controls.Add(valueControl, 1, row);
@@ -45,9 +45,9 @@ namespace WgSharp.Ui
             t.AutoSize = true;
             t.AutoSizeMode = AutoSizeMode.GrowAndShrink;
             t.ColumnCount = 2;
-            t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 140));
+            t.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, Dpi.S(140)));
             t.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            t.Padding = new Padding(6, 4, 6, 8);
+            t.Padding = Dpi.Pad(6, 4, 6, 8);
             t.BackColor = Color.Transparent;
             return t;
         }
@@ -65,7 +65,7 @@ namespace WgSharp.Ui
             lbl.ForeColor = AppTheme.FieldLabel;
             lbl.TextAlign = ContentAlignment.TopRight;
             lbl.Dock = DockStyle.Fill;
-            lbl.Margin = new Padding(3, 4, 6, 2);
+            lbl.Margin = Dpi.Pad(3, 4, 6, 2);
             lbl.AutoSize = true;
             lbl.Anchor = AnchorStyles.Top | AnchorStyles.Right;
 
@@ -75,7 +75,7 @@ namespace WgSharp.Ui
             val.ForeColor = AppTheme.FieldValue;
             val.TextAlign = ContentAlignment.TopLeft;
             val.Dock = DockStyle.Fill;
-            val.Margin = new Padding(0, 4, 3, 2);
+            val.Margin = Dpi.Pad(0, 4, 3, 2);
             val.AutoSize = false;
             val.UseMnemonic = false;
             WrapToRow(t, row, val, 21);
@@ -93,7 +93,7 @@ namespace WgSharp.Ui
         {
             int row = t.RowCount;
             t.RowCount = row + 1;
-            t.RowStyles.Add(new RowStyle(SizeType.Absolute, 20));
+            t.RowStyles.Add(new RowStyle(SizeType.Absolute, Dpi.S(20)));
 
             var lbl = new Label();
             lbl.Text = label + ":";
@@ -101,7 +101,7 @@ namespace WgSharp.Ui
             lbl.ForeColor = AppTheme.FieldLabel;
             lbl.TextAlign = ContentAlignment.TopRight;
             lbl.Dock = DockStyle.Fill;
-            lbl.Margin = new Padding(3, 4, 6, 2);
+            lbl.Margin = Dpi.Pad(3, 4, 6, 2);
 
             var val = new Label();
             val.Text = value;
@@ -109,7 +109,7 @@ namespace WgSharp.Ui
             val.ForeColor = AppTheme.FieldValue;
             val.TextAlign = ContentAlignment.TopLeft;
             val.Dock = DockStyle.Fill;
-            val.Margin = new Padding(0, 4, 3, 2);
+            val.Margin = Dpi.Pad(0, 4, 3, 2);
             val.AutoSize = false;
             val.UseMnemonic = false;
             // One line when the pane is wide enough for the 44-char key; wraps onto a second
@@ -134,7 +134,7 @@ namespace WgSharp.Ui
                 if (val.Width <= 0 || row >= t.RowStyles.Count) return;
                 Size sz = TextRenderer.MeasureText(val.Text, val.Font, new Size(val.Width, int.MaxValue),
                     TextFormatFlags.WordBreak | TextFormatFlags.NoPadding | TextFormatFlags.TextBoxControl);
-                int want = Math.Max(minHeight, sz.Height + val.Margin.Vertical + 2);
+                int want = Math.Max(Dpi.S(minHeight), sz.Height + val.Margin.Vertical + Dpi.S(2));
                 RowStyle rs = t.RowStyles[row];
                 if (rs.SizeType != SizeType.Absolute || (int)rs.Height != want)
                 {

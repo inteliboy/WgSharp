@@ -404,3 +404,23 @@ Symptoms were a stuttering UI (worst while dragging the window), and idle CPU on
   Do NOT render tray variants at runtime via `new Icon(icon, size)`/`ToBitmap()`: with PNG-compressed frames that
   path hits the GDI+ bug from `AppIconLoader` and produced visibly corrupted icons. Regenerate the grey .ico if
   `WgSharp.ico` changes.
+
+## DPI awareness (app.manifest, src/ui/Dpi.cs)
+Before this the process was DPI-unaware, so above 100% Windows bitmap-stretched the whole UI (soft text).
+- **`app.manifest` declares `<dpiAware>true</dpiAware>` (system-aware), deliberately NOT per-monitor.** Per-monitor
+  needs WinForms' 4.7+ DPI-change handling, i.e. an `app.config` switch plus a 4.7+ `TargetFrameworkAttribute`;
+  this csc-only build ships neither (no `.exe.config`, no target attribute), and a PerMonitorV2 manifest without
+  them leaves controls unscaled on a DPI change. Cost: moving the window to a monitor with a different scale
+  than the primary one gets Windows' bitmap stretching on that monitor only.
+- **All forms use `AutoScaleMode.None` and scale by hand through `Dpi.S/Sz/Pt/Pad`** (`Dpi.Scale` = system DPI/96).
+  Code-built forms have no `AutoScaleDimensions`, so WinForms auto-scaling does nothing for them anyway, and
+  `BuildDetail()` runs both before and after first show, which makes auto-scaling ambiguous for dynamic rows.
+  Write layout numbers at 96 DPI and wrap them. Values derived from `ClientSize`/measured text are already in real
+  pixels: do not wrap them again. Point-size fonts need no scaling. Custom-drawn glyphs (`DrawShield`,
+  `StatusRow.DrawShield`) draw on a 16/14px grid and scale via the Graphics transform; icon bitmaps take a pixel
+  size, and `_trayMenu.ImageScalingSize` must match the shield bitmap size.
+- **Intentionally left unscaled**: the 1px theme borders, and the tab-strip overlay panels' small pixel offsets in
+  `BuildTabOverlays` (they cover native 1-2px tab frame borders, which do not grow with DPI).
+- **Verified at 150% (this machine, 144 DPI)**: main window, Stats and Settings tabs, About, Edit, Password,
+  QR and themed message box all laid out correctly with crisp text. Not verified at 100%/200% or on a
+  multi-monitor mixed-DPI setup.
