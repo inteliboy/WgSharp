@@ -6,7 +6,8 @@
 # EndSessionMessage="yes" TerminateProcess="1"> gave (see the removed
 # installer\Product.wxs for that history).
 param(
-    [int]$TimeoutSeconds = 15
+    [int]$TimeoutSeconds = 15,
+    [string]$InstallDir = ''
 )
 
 $ErrorActionPreference = 'SilentlyContinue'
@@ -87,8 +88,10 @@ public static class WgSharpCloser
         return targets.Count;
     }
 }
-'@ -ErrorAction Stop
+'@ -ErrorAction SilentlyContinue
 
+    # If the helper failed to compile, skip the polite close and fall through
+    # to the forced termination below instead of aborting the whole script.
     foreach ($p in $guiProcs) {
         try { [WgSharpCloser]::CloseTopLevelWindows($p.Id) | Out-Null } catch { }
     }
@@ -108,6 +111,46 @@ public static class WgSharpCloser
     Get-Process -Name 'WgSharp' -ErrorAction SilentlyContinue |
         Where-Object { $_.SessionId -ne 0 } |
         Stop-Process -Force -ErrorAction SilentlyContinue
+}
+
+# --- Final guarantee: nothing holds WgSharp.exe, and it is writable -----
+# A service that reports "Stopped" can still have its process alive for a
+# moment (or Stop-Service can time out while the tunnel tears down), and a
+# GUI can survive the steps above. Setup used to start copying right away
+# and failed with "Error opening file for writing". Now: kill whatever
+# WgSharp process still runs from the install directory (any session), then
+# wait until the exe can actually be opened for writing before returning.
+function Get-InstallProcs {
+    Get-Process -Name 'WgSharp' -ErrorAction SilentlyContinue | Where-Object {
+        $path = $null
+        try { $path = $_.MainModule.FileName } catch { }
+        # Unreadable path: assume it is ours (safer for the install to proceed).
+        (-not $path) -or (-not $InstallDir) -or $path.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase)
+    }
+}
+
+function Test-ExeWritable {
+    if (-not $InstallDir) { return $true }
+    $exe = Join-Path $InstallDir 'WgSharp.exe'
+    if (-not (Test-Path -LiteralPath $exe)) { return $true }
+    try {
+        $fs = [System.IO.File]::Open($exe, 'Open', 'ReadWrite', 'None')
+        $fs.Close()
+        return $true
+    } catch { return $false }
+}
+
+$deadline = (Get-Date).AddSeconds(30)
+while ($true) {
+    $left = @(Get-InstallProcs)
+    if ($left.Count -gt 0) {
+        $left | Stop-Process -Force -ErrorAction SilentlyContinue
+        # Last resort for a stubborn service process.
+        & sc.exe stop WgSharpSvc 2>&1 | Out-Null
+    }
+    if ($left.Count -eq 0 -and (Test-ExeWritable)) { break }
+    if ((Get-Date) -gt $deadline) { break }
+    Start-Sleep -Milliseconds 400
 }
 
 exit 0

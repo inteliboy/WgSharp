@@ -315,7 +315,7 @@ Function CloseRunningWgSharp
   InitPluginsDir
   File "/oname=$PLUGINSDIR\CloseWgSharp.ps1" "CloseWgSharp.ps1"
   DetailPrint "Closing any running WgSharp instance and stopping the WgSharpSvc service..."
-  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\CloseWgSharp.ps1" -TimeoutSeconds 15'
+  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\CloseWgSharp.ps1" -TimeoutSeconds 15 -InstallDir "$INSTDIR"'
   Pop $0
 FunctionEnd
 
@@ -394,7 +394,7 @@ Function un.CloseRunningWgSharp
   InitPluginsDir
   File "/oname=$PLUGINSDIR\CloseWgSharp.ps1" "CloseWgSharp.ps1"
   DetailPrint "Closing any running WgSharp instance and stopping the WgSharpSvc service..."
-  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\CloseWgSharp.ps1" -TimeoutSeconds 15'
+  nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\CloseWgSharp.ps1" -TimeoutSeconds 15 -InstallDir "$INSTDIR"'
   Pop $0
 FunctionEnd
 
