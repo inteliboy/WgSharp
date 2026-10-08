@@ -92,6 +92,9 @@ namespace WgSharp.Ui
         {
             _startInTray = startInTray;
             InitializeComponent();
+            // Centered on first show. Later hide-to-tray / minimize / restore keep the
+            // window where the user left it (the Form object lives for the whole run).
+            StartPosition = FormStartPosition.CenterScreen;
             BuildTabOverlays();
             SetupToolbarTooltips();
             UpdateTrayIcon(null); // grey until a status update says otherwise
