@@ -1360,6 +1360,7 @@ namespace WgSharp.Ui
             grpPeer.ResumeLayout(false);
             grpInterface.ResumeLayout(false);
             pnlDetail.ResumeLayout(true);
+            PositionEditButton();
 
             // Only now that btnActivate/btnEdit live under the new hosts is it
             // safe to dispose the old ones.

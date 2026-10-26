@@ -160,6 +160,7 @@ namespace WgSharp.Ui
             this.pnlDetail.AutoScroll = true;
             this.pnlDetail.Padding = Dpi.Pad(10, 6, 10, 6);
             this.pnlDetail.BackColor = Color.White;
+            this.pnlDetail.SizeChanged += delegate { PositionEditButton(); };
 
             this.grpInterface.Text = "Interface";
             this.grpInterface.Dock = DockStyle.Top;
@@ -184,7 +185,9 @@ namespace WgSharp.Ui
 
             this.btnEdit.Text = "Edit";
             this.btnEdit.Size = Dpi.Sz(80, 26);
-            this.btnEdit.Anchor = AnchorStyles.Bottom | AnchorStyles.Right;
+            // Positioned by hand in PositionEditButton (re-run on pnlDetail.SizeChanged); an
+            // anchor would capture stale offsets whenever the panel is resized while detached.
+            this.btnEdit.Anchor = AnchorStyles.Top | AnchorStyles.Left;
             this.btnEdit.UseVisualStyleBackColor = true;
             this.btnEdit.Click += new System.EventHandler(this.OnEditClicked);
 
