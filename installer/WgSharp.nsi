@@ -317,6 +317,42 @@ Function CloseRunningWgSharp
   DetailPrint "Closing any running WgSharp instance and stopping the WgSharpSvc service..."
   nsExec::ExecToLog 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PLUGINSDIR\CloseWgSharp.ps1" -TimeoutSeconds 15 -InstallDir "$INSTDIR"'
   Pop $0
+  DetailPrint "Close step finished (exit code $0)."
+FunctionEnd
+
+; Backstop for CloseRunningWgSharp: that step shells out to PowerShell, and
+; when it silently does nothing (blocked/slow/failed - it has been seen to
+; leave the tray instance running) the copy below dies with "Error opening
+; file for writing". Here, with no dependency on PowerShell: retry opening
+; the exe for writing for a few seconds, then move the locked exe aside -
+; Windows allows renaming a running image - so the new one can be written.
+; The old copy keeps running until the user restarts it; its leftover is
+; removed at next reboot (and by the uninstaller).
+Function UnlockMainExe
+  IfFileExists "$INSTDIR\WgSharp.exe" 0 um_done
+  StrCpy $1 0
+  um_retry:
+  ClearErrors
+  FileOpen $0 "$INSTDIR\WgSharp.exe" a
+  IfErrors um_locked
+  FileClose $0
+  Goto um_done
+  um_locked:
+  IntOp $1 $1 + 1
+  IntCmp $1 5 um_rename 0 um_rename
+  Sleep 1000
+  Goto um_retry
+  um_rename:
+  DetailPrint "WgSharp.exe is still in use; moving it aside so the update can proceed."
+  Delete "$INSTDIR\WgSharp.exe.old"
+  ClearErrors
+  Rename "$INSTDIR\WgSharp.exe" "$INSTDIR\WgSharp.exe.old"
+  IfErrors 0 um_renamed
+  DetailPrint "Could not move WgSharp.exe aside."
+  Goto um_done
+  um_renamed:
+  Delete /REBOOTOK "$INSTDIR\WgSharp.exe.old"
+  um_done:
 FunctionEnd
 
 ; Registers (or re-points) the WgSharpSvc service, matching
@@ -349,6 +385,7 @@ Section "-Main" SecMain
 
   Call RemoveLegacyMsiInstalls
   Call CloseRunningWgSharp
+  Call UnlockMainExe
 
   SetOutPath "$INSTDIR"
   SetOverwrite on
@@ -419,6 +456,7 @@ Section "Uninstall"
   ; leave them (or $INSTDIR itself) behind, same as the old MSI's own
   ; explicit RemoveFile entries for both.
   Delete "$INSTDIR\WgSharp.exe"
+  Delete "$INSTDIR\WgSharp.exe.old"
   Delete "$INSTDIR\LICENSE.txt"
   Delete "$INSTDIR\README.md"
   Delete "$INSTDIR\wintun.dll"

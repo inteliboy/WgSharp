@@ -12,6 +12,18 @@ param(
 
 $ErrorActionPreference = 'SilentlyContinue'
 
+# Diagnostic trail: every step is silent by design (a failed close must never
+# abort Setup), so when an install still hits "Error opening file for writing"
+# this file is the only record of what the script saw and did.
+$LogFile = Join-Path $env:TEMP 'WgSharp-Setup-close.log'
+function Write-Trace([string]$msg) {
+    $line = (Get-Date).ToString('HH:mm:ss.fff') + ' ' + $msg
+    try { Add-Content -LiteralPath $LogFile -Value $line } catch { }
+    # stdout: nsExec::ExecToLog shows it in Setup's "Show details" pane.
+    Write-Output $line
+}
+Write-Trace ("start PS " + $PSVersionTable.PSVersion + " 64bit=" + [Environment]::Is64BitProcess + " InstallDir='" + $InstallDir + "'")
+
 # --- Stop the background service first ---------------------------------
 # Same service ServiceInstaller.cs registers/controls at runtime (name
 # WgSharpSvc, LocalSystem, "<exe> --service"). Stopping it here releases
@@ -19,6 +31,7 @@ $ErrorActionPreference = 'SilentlyContinue'
 # replaces the file.
 $svc = Get-Service -Name 'WgSharpSvc' -ErrorAction SilentlyContinue
 if ($svc -and $svc.Status -ne 'Stopped') {
+    Write-Trace 'stopping WgSharpSvc'
     try { Stop-Service -Name 'WgSharpSvc' -Force -ErrorAction SilentlyContinue } catch { }
     try { $svc.WaitForStatus('Stopped', (New-TimeSpan -Seconds 30)) } catch { }
 }
@@ -93,7 +106,8 @@ public static class WgSharpCloser
     # If the helper failed to compile, skip the polite close and fall through
     # to the forced termination below instead of aborting the whole script.
     foreach ($p in $guiProcs) {
-        try { [WgSharpCloser]::CloseTopLevelWindows($p.Id) | Out-Null } catch { }
+        Write-Trace ("WM_ENDSESSION to pid " + $p.Id)
+        try { [WgSharpCloser]::CloseTopLevelWindows($p.Id) | Out-Null } catch { Write-Trace ("close failed: " + $_) }
     }
 
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -143,6 +157,7 @@ function Test-ExeWritable {
 $deadline = (Get-Date).AddSeconds(30)
 while ($true) {
     $left = @(Get-InstallProcs)
+    Write-Trace ("loop: " + $left.Count + " proc(s) left, writable=" + (Test-ExeWritable))
     if ($left.Count -gt 0) {
         $left | Stop-Process -Force -ErrorAction SilentlyContinue
         # Last resort for a stubborn service process.
@@ -153,4 +168,5 @@ while ($true) {
     Start-Sleep -Milliseconds 400
 }
 
+Write-Trace ("done: writable=" + (Test-ExeWritable))
 exit 0
